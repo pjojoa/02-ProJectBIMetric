@@ -4,19 +4,23 @@ import fastify from "fastify";
 import cors from "@fastify/cors";
 import { getClientCredentialsAccessToken } from "./lib/auth.js";
 
-let config = dotenv.config().parsed || process.env;
+// Load .env file if it exists (local development)
+dotenv.config();
 
-if (!config.APS_CLIENT_ID || !config.APS_CLIENT_SECRET) {
+// Try to load from config.json if env vars are not set
+if (!process.env.APS_CLIENT_ID || !process.env.APS_CLIENT_SECRET) {
     try {
         const configFile = fs.readFileSync("./config.json", "utf8");
         const jsonConfig = JSON.parse(configFile);
-        config = { ...config, ...jsonConfig };
+        process.env.APS_CLIENT_ID = process.env.APS_CLIENT_ID || jsonConfig.APS_CLIENT_ID;
+        process.env.APS_CLIENT_SECRET = process.env.APS_CLIENT_SECRET || jsonConfig.APS_CLIENT_SECRET;
+        process.env.PORT = process.env.PORT || jsonConfig.PORT;
     } catch (e) {
-        // ignore
+        // config.json doesn't exist, that's ok in production
     }
 }
 
-const { APS_CLIENT_ID, APS_CLIENT_SECRET, PORT } = config;
+const { APS_CLIENT_ID, APS_CLIENT_SECRET, PORT } = process.env;
 
 if (!APS_CLIENT_ID || !APS_CLIENT_SECRET) {
     console.error("Missing required environment variables: APS_CLIENT_ID, APS_CLIENT_SECRET");

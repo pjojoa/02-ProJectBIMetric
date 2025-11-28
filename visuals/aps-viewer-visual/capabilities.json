@@ -1,0 +1,81 @@
+{
+    "dataRoles": [
+        {
+            "displayName": "Model URN",
+            "name": "modelUrn",
+            "kind": "Grouping"
+        },
+        {
+            "displayName": "Element ID",
+            "name": "elementId",
+            "kind": "Grouping"
+        },
+        {
+            "displayName": "Category",
+            "name": "category",
+            "kind": "Grouping"
+        }
+    ],
+    "dataViewMappings": [
+        {
+            "conditions": [
+                {
+                    "modelUrn": {
+                        "max": 1
+                    },
+                    "elementId": {
+                        "min": 0
+                    },
+                    "category": {
+                        "min": 0
+                    }
+                }
+            ],
+            "table": {
+                "rows": {
+                    "select": [
+                        {
+                            "for": {
+                                "in": "modelUrn"
+                            }
+                        },
+                        {
+                            "for": {
+                                "in": "elementId"
+                            }
+                        },
+                        {
+                            "for": {
+                                "in": "category"
+                            }
+                        }
+                    ]
+                }
+            }
+        }
+    ],
+    "objects": {
+        "viewer": {
+            "properties": {
+                "accessTokenEndpoint": {
+                    "type": {
+                        "text": true
+                    }
+                }
+            }
+        }
+    },
+    "privileges": [
+        {
+            "name": "WebAccess",
+            "essential": true,
+            "parameters": [
+                "*"
+            ]
+        }
+    ],
+    "supportsMultiVisualSelection": true,
+    "suppressDefaultTitle": true,
+    "supportsLandingPage": true,
+    "supportsEmptyDataView": true
+}

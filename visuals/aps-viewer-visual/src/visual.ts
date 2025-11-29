@@ -95,15 +95,7 @@ export class Visual implements IVisual {
         }
 
         if (this.idMapping) {
-            const isDataFilterApplied = this.currentDataView.metadata?.isDataFilterApplied;
-            if (this.externalIds.length > 0 && isDataFilterApplied) {
-                const dbids = await this.idMapping.getDbids(this.externalIds);
-                this.viewer.isolate(dbids);
-                this.viewer.fitToView(dbids);
-            } else {
-                this.viewer.isolate();
-                this.viewer.fitToView();
-            }
+            await this.syncSelectionState();
         }
     }
 
@@ -311,9 +303,35 @@ export class Visual implements IVisual {
 
     private async onPropertiesLoaded() {
         this.idMapping = new IdMapping(this.model);
+        await this.syncSelectionState();
+    }
+
+    private async syncSelectionState() {
+        if (!this.idMapping || !this.currentDataView) return;
+
+        const isDataFilterApplied = this.currentDataView.metadata?.isDataFilterApplied;
+
+        // If a filter is applied, we strictly isolate the matching elements.
+        if (isDataFilterApplied && this.externalIds.length > 0) {
+            const dbids = await this.idMapping.getDbids(this.externalIds);
+
+            // Debugging ID mismatch
+            if (dbids.length === 0 && this.externalIds.length > 0) {
+                console.warn('Visual: Filter applied but no matching DbIds found. Check if Element IDs match Model External IDs.');
+            }
+
+            this.viewer.isolate(dbids);
+            this.viewer.fitToView(dbids);
+        } else {
+            // If no filter is applied (or no rows), we show everything.
+            // This protects against ID mismatches hiding the whole model.
+            this.viewer.isolate();
+            this.viewer.fitToView();
+        }
     }
 
     private async onSelectionChanged() {
+        console.log('Visual: Selection Changed triggered');
         const allExternalIds = this.currentDataView.table.rows;
         if (!allExternalIds) {
             return;
@@ -324,7 +342,11 @@ export class Visual implements IVisual {
         if (idIndex === -1) return;
 
         const selectedDbids = this.viewer.getSelection();
+        console.log('Visual: Selected DbIds:', selectedDbids);
+
         const selectedExternalIds = await this.idMapping.getExternalIds(selectedDbids);
+        console.log('Visual: Selected External Ids:', selectedExternalIds);
+
         const selectionIds: powerbi.extensibility.ISelectionId[] = [];
         for (const selectedExternalId of selectedExternalIds) {
             const rowIndex = allExternalIds.findIndex(row => row[idIndex] === selectedExternalId);
@@ -335,6 +357,8 @@ export class Visual implements IVisual {
                 selectionIds.push(selectionId);
             }
         }
+
+        console.log('Visual: Sending selection to Power BI:', selectionIds);
         this.selectionManager.select(selectionIds);
     }
 

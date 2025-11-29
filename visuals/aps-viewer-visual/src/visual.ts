@@ -153,31 +153,21 @@ export class Visual implements IVisual {
                 Object.defineProperty(window, 'sessionStorage', { value: storageShim, writable: true });
             }
 
-            // Smart Environment Detection
+            // Smart Environment Detection via Backend
             let env = this.formattingSettings?.viewerCard?.viewerEnv?.value;
             let region = this.formattingSettings?.viewerCard?.viewerRegion?.value || 'US';
 
-            // If no env is explicitly set (or default), try to auto-detect
+            // If no env is explicitly set (or default), try to auto-detect via backend
             if ((!env || env === 'AutodeskProduction2') && this.urn) {
                 try {
-                    const token = await this.fetchToken();
-                    if (token) {
-                        const manifest = await this.getManifest(this.urn, token);
-                        if (manifest && manifest.status === 'success') {
-                            // Check for SVF2
-                            const hasSVF2 = manifest.derivatives?.some(d => d.outputType === 'svf2');
-                            if (hasSVF2) {
-                                env = 'AutodeskProduction2';
-                            } else {
-                                env = 'AutodeskProduction';
-                                console.log('Smart Init: Detected SVF model, switching to AutodeskProduction');
-                            }
-
-                            // Check region from manifest if possible (not standard, but we can infer or default)
-                            if (manifest.region) {
-                                region = manifest.region;
-                            }
-                        }
+                    const tokenData = await this.fetchToken(this.urn);
+                    if (tokenData && tokenData.detected_env) {
+                        env = tokenData.detected_env;
+                        console.log(`Smart Init: Backend detected env: ${env}`);
+                    }
+                    if (tokenData && tokenData.detected_region) {
+                        region = tokenData.detected_region;
+                        console.log(`Smart Init: Backend detected region: ${region}`);
                     }
                 } catch (e) {
                     console.warn('Smart Init failed, falling back to default env', e);
@@ -193,7 +183,7 @@ export class Visual implements IVisual {
                 env: env,
                 api: api,
                 region: region,
-                getAccessToken: this.getAccessToken,
+                getAccessToken: (callback) => this.getAccessToken(callback), // Wrap to maintain context
                 // @ts-ignore
                 disabledExtensions: { 'Autodesk.Viewing.MixpanelExtension': true }
             });
@@ -211,33 +201,17 @@ export class Visual implements IVisual {
         }
     }
 
-    private async fetchToken(): Promise<string> {
+    private async fetchToken(urn?: string): Promise<any> {
         try {
-            const response = await fetch(this.accessTokenEndpoint);
+            let url = this.accessTokenEndpoint;
+            if (urn) {
+                // Append URN to query params
+                const separator = url.includes('?') ? '&' : '?';
+                url += `${separator}urn=${encodeURIComponent(urn)}`;
+            }
+            const response = await fetch(url);
             if (!response.ok) return null;
-            const json = await response.json();
-            return json.access_token;
-        } catch {
-            return null;
-        }
-    }
-
-    private async getManifest(urn: string, token: string): Promise<any> {
-        // Ensure URN is encoded
-        let safeUrn = urn.trim();
-        if (safeUrn.toLowerCase().startsWith('urn:')) safeUrn = safeUrn.substring(4);
-        if (/[^A-Za-z0-9+\/\-_=]/.test(safeUrn)) {
-            let urnToEncode = urn.trim();
-            if (!urnToEncode.toLowerCase().startsWith('urn:')) urnToEncode = 'urn:' + urnToEncode;
-            safeUrn = btoa(urnToEncode).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-        }
-
-        try {
-            const res = await fetch(`https://developer.api.autodesk.com/modelderivative/v2/designdata/${safeUrn}/manifest`, {
-                headers: { Authorization: `Bearer ${token}` }
-            });
-            if (!res.ok) return null;
-            return await res.json();
+            return await response.json();
         } catch {
             return null;
         }

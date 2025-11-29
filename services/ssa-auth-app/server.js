@@ -40,9 +40,42 @@ app.get("/", (request, reply) => {
     `);
 });
 
-app.get("/token", async () => {
+app.get("/token", async (request) => {
     try {
-        return await getClientCredentialsAccessToken(APS_CLIENT_ID, APS_CLIENT_SECRET, SCOPES);
+        const tokenData = await getClientCredentialsAccessToken(APS_CLIENT_ID, APS_CLIENT_SECRET, SCOPES);
+
+        // Check for URN in query params for Smart Environment Detection
+        const urn = request.query.urn;
+        if (urn) {
+            try {
+                // Ensure URN is URL-safe Base64 for the API call
+                let safeUrn = urn.trim();
+                if (safeUrn.toLowerCase().startsWith('urn:')) safeUrn = safeUrn.substring(4);
+
+                // If it's not base64 (contains :), encode it
+                if (safeUrn.includes(':')) {
+                    safeUrn = Buffer.from('urn:' + urn.trim()).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+                } else {
+                    // Fix standard base64 to URL-safe
+                    safeUrn = safeUrn.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+                }
+
+                const manifestRes = await fetch(`https://developer.api.autodesk.com/modelderivative/v2/designdata/${safeUrn}/manifest`, {
+                    headers: { Authorization: `Bearer ${tokenData.access_token}` }
+                });
+
+                if (manifestRes.ok) {
+                    const manifest = await manifestRes.json();
+                    const hasSVF2 = manifest.derivatives?.some(d => d.outputType === 'svf2');
+                    tokenData.detected_env = hasSVF2 ? 'AutodeskProduction2' : 'AutodeskProduction';
+                    tokenData.detected_region = manifest.region || 'US';
+                }
+            } catch (e) {
+                app.log.warn(`Failed to detect environment for URN ${urn}: ${e.message}`);
+            }
+        }
+
+        return tokenData;
     } catch (err) {
         app.log.error(err);
         throw new Error("Failed to get access token");

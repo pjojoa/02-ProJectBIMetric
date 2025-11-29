@@ -138,8 +138,53 @@ export class Visual implements IVisual {
      */
     private async initializeViewer(): Promise<void> {
         try {
-            const env = this.formattingSettings?.viewerCard?.viewerEnv?.value || 'AutodeskProduction2';
-            const region = this.formattingSettings?.viewerCard?.viewerRegion?.value || 'US';
+            // Shim localStorage and sessionStorage to prevent SecurityError in Power BI sandbox
+            try {
+                const _test = window.localStorage;
+            } catch (e) {
+                console.warn('Storage access denied. Shimming...');
+                const storageShim = {
+                    getItem: () => null,
+                    setItem: () => { },
+                    removeItem: () => { },
+                    clear: () => { }
+                };
+                Object.defineProperty(window, 'localStorage', { value: storageShim, writable: true });
+                Object.defineProperty(window, 'sessionStorage', { value: storageShim, writable: true });
+            }
+
+            // Smart Environment Detection
+            let env = this.formattingSettings?.viewerCard?.viewerEnv?.value;
+            let region = this.formattingSettings?.viewerCard?.viewerRegion?.value || 'US';
+
+            // If no env is explicitly set (or default), try to auto-detect
+            if ((!env || env === 'AutodeskProduction2') && this.urn) {
+                try {
+                    const token = await this.fetchToken();
+                    if (token) {
+                        const manifest = await this.getManifest(this.urn, token);
+                        if (manifest && manifest.status === 'success') {
+                            // Check for SVF2
+                            const hasSVF2 = manifest.derivatives?.some(d => d.outputType === 'svf2');
+                            if (hasSVF2) {
+                                env = 'AutodeskProduction2';
+                            } else {
+                                env = 'AutodeskProduction';
+                                console.log('Smart Init: Detected SVF model, switching to AutodeskProduction');
+                            }
+
+                            // Check region from manifest if possible (not standard, but we can infer or default)
+                            if (manifest.region) {
+                                region = manifest.region;
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.warn('Smart Init failed, falling back to default env', e);
+                }
+            }
+
+            env = env || 'AutodeskProduction2';
 
             // API depends on Env: SVF2 -> streamingV2, SVF -> derivativeV2
             const api = env.includes('Production2') ? 'streamingV2' : 'derivativeV2';
@@ -148,7 +193,9 @@ export class Visual implements IVisual {
                 env: env,
                 api: api,
                 region: region,
-                getAccessToken: this.getAccessToken
+                getAccessToken: this.getAccessToken,
+                // @ts-ignore
+                disabledExtensions: { 'Autodesk.Viewing.MixpanelExtension': true }
             });
             this.container.innerText = '';
             this.viewer = new Autodesk.Viewing.GuiViewer3D(this.container);
@@ -161,6 +208,38 @@ export class Visual implements IVisual {
         } catch (err) {
             this.showNotification('Could not initialize viewer runtime. Please see console for more details.');
             console.error(err);
+        }
+    }
+
+    private async fetchToken(): Promise<string> {
+        try {
+            const response = await fetch(this.accessTokenEndpoint);
+            if (!response.ok) return null;
+            const json = await response.json();
+            return json.access_token;
+        } catch {
+            return null;
+        }
+    }
+
+    private async getManifest(urn: string, token: string): Promise<any> {
+        // Ensure URN is encoded
+        let safeUrn = urn.trim();
+        if (safeUrn.toLowerCase().startsWith('urn:')) safeUrn = safeUrn.substring(4);
+        if (/[^A-Za-z0-9+\/\-_=]/.test(safeUrn)) {
+            let urnToEncode = urn.trim();
+            if (!urnToEncode.toLowerCase().startsWith('urn:')) urnToEncode = 'urn:' + urnToEncode;
+            safeUrn = btoa(urnToEncode).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+        }
+
+        try {
+            const res = await fetch(`https://developer.api.autodesk.com/modelderivative/v2/designdata/${safeUrn}/manifest`, {
+                headers: { Authorization: `Bearer ${token}` }
+            });
+            if (!res.ok) return null;
+            return await res.json();
+        } catch {
+            return null;
         }
     }
 
@@ -201,17 +280,46 @@ export class Visual implements IVisual {
 
         try {
             if (this.urn) {
-                // Sanitize URN: remove whitespace and 'urn:' prefix if present
+                console.log('Visual: Raw URN:', this.urn);
+
+                // Sanitize URN: remove whitespace
                 let safeUrn = this.urn.trim();
+
+                // If it starts with 'urn:', strip it for processing
                 if (safeUrn.toLowerCase().startsWith('urn:')) {
                     safeUrn = safeUrn.substring(4);
                 }
+
+                // Check if it needs encoding (contains non-base64 characters like ':' or '.')
+                // OR if it contains standard base64 characters that need replacing (+ or /)
+                if (/[^A-Za-z0-9\-_]/.test(safeUrn)) {
+                    // It contains characters NOT allowed in URL-safe Base64.
+                    // Check if it's plain text (has :)
+                    if (safeUrn.includes(':')) {
+                        console.log('Visual: Detected plain text URN, encoding...');
+                        let urnToEncode = this.urn.trim();
+                        if (!urnToEncode.toLowerCase().startsWith('urn:')) {
+                            urnToEncode = 'urn:' + urnToEncode;
+                        }
+                        try {
+                            safeUrn = btoa(urnToEncode).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+                        } catch (e) {
+                            console.error('Failed to encode URN:', e);
+                        }
+                    } else {
+                        // It might be standard Base64 (with + or / or =), fix it to URL-safe
+                        console.log('Visual: Detected standard Base64 or invalid chars, fixing...');
+                        safeUrn = safeUrn.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+                    }
+                }
+
+                console.log('Visual: Final Safe URN:', safeUrn);
                 this.model = await loadModel(this.viewer, safeUrn, this.guid);
             }
         } catch (err) {
             let decodedUrn = '';
             try {
-                decodedUrn = atob(this.urn);
+                decodedUrn = atob(this.urn.replace(/-/g, '+').replace(/_/g, '/'));
             } catch (e) {
                 decodedUrn = 'Invalid Base64';
             }

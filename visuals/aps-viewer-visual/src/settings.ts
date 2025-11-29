@@ -12,7 +12,7 @@ class ViewerCard extends Card {
         displayName: 'Access Token Endpoint',
         description: 'URL that the viewer can call to generate access tokens.',
         placeholder: '',
-        value: 'http://localhost:3000/token'
+        value: 'https://zero2-projectbimetric.onrender.com/token'
     });
     viewerEnv = new formattingSettings.TextInput({
         name: 'viewerEnv',

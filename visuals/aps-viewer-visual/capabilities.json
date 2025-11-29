@@ -1,52 +1,49 @@
 {
     "dataRoles": [
         {
-            "displayName": "Model URN",
-            "name": "modelUrn",
+            "displayName": "Urn",
+            "name": "urn",
             "kind": "Grouping"
         },
         {
-            "displayName": "Element ID",
-            "name": "elementId",
+            "displayName": "DbIds",
+            "name": "dbids",
             "kind": "Grouping"
         },
         {
-            "displayName": "Category",
-            "name": "category",
+            "displayName": "Vista",
+            "name": "guid",
+            "kind": "Grouping"
+        },
+        {
+            "displayName": "Color",
+            "name": "color",
             "kind": "Grouping"
         }
     ],
     "dataViewMappings": [
         {
-            "conditions": [
-                {
-                    "modelUrn": {
-                        "max": 1
-                    },
-                    "elementId": {
-                        "min": 0
-                    },
-                    "category": {
-                        "min": 0
-                    }
-                }
-            ],
             "table": {
                 "rows": {
                     "select": [
                         {
                             "for": {
-                                "in": "modelUrn"
+                                "in": "urn"
                             }
                         },
                         {
                             "for": {
-                                "in": "elementId"
+                                "in": "dbids"
                             }
                         },
                         {
                             "for": {
-                                "in": "category"
+                                "in": "guid"
+                            }
+                        },
+                        {
+                            "for": {
+                                "in": "color"
                             }
                         }
                     ]

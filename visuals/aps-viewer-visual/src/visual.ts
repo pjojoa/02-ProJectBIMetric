@@ -20,20 +20,29 @@ import { initializeViewerRuntime, loadModel, IdMapping } from './viewer.utils';
 export class Visual implements IVisual {
     // Visual state
     private host: IVisualHost;
+    private statusDiv: HTMLDivElement;
     private container: HTMLElement;
     private formattingSettings: VisualSettingsModel;
     private formattingSettingsService: FormattingSettingsService;
     private currentDataView: DataView = null;
     private selectionManager: ISelectionManager = null;
+    private isProgrammaticSelection: boolean = false;
 
     // Visual inputs
     private accessTokenEndpoint: string = '';
 
-    // Viewer runtime
-    private viewer: Autodesk.Viewing.GuiViewer3D = null;
-    private urn: string = '';
-    private guid: string = '';
+    private currentUrn: string = "";
+    private currentGuid: string | null = null;
+    private viewer: Autodesk.Viewing.GuiViewer3D;
+    private isViewerReady: boolean = false;
+
+    // Map SelectionId Key -> { id: string, color: string | null, selectionId: ISelectionId }
+    private elementDataMap: Map<string, { id: string, color: string | null, selectionId: powerbi.visuals.ISelectionId }> = new Map();
+
+    // Store all external IDs (or DbIds) from the dataset for bulk mapping
     private externalIds: string[] = [];
+
+    // Viewer runtime
     private model: Autodesk.Viewing.Model = null;
     private idMapping: IdMapping = null;
 
@@ -46,10 +55,33 @@ export class Visual implements IVisual {
         this.selectionManager = options.host.createSelectionManager();
         this.formattingSettingsService = new FormattingSettingsService();
         this.container = options.element;
+
+        // Create Status Bar for on-screen debugging
+        this.statusDiv = document.createElement('div');
+        this.statusDiv.style.position = 'absolute';
+        this.statusDiv.style.bottom = '5px';
+        this.statusDiv.style.left = '5px';
+        this.statusDiv.style.color = 'white';
+        this.statusDiv.style.backgroundColor = 'rgba(0, 0, 0, 0.7)';
+        this.statusDiv.style.padding = '5px';
+        this.statusDiv.style.fontSize = '12px';
+        this.statusDiv.style.zIndex = '999';
+        this.statusDiv.style.pointerEvents = 'none';
+        this.statusDiv.style.display = 'none'; // Hidden by default, shown when data present
+        this.container.appendChild(this.statusDiv);
+
         this.getAccessToken = this.getAccessToken.bind(this);
         this.onPropertiesLoaded = this.onPropertiesLoaded.bind(this);
         this.onSelectionChanged = this.onSelectionChanged.bind(this);
     }
+
+
+
+    /**
+     * Notifies the viewer visual of an update (data, viewmode, size change).
+     * @param options Additional visual update options.
+     */
+    private allRows: powerbi.DataViewTableRow[] = [];
 
     /**
      * Notifies the viewer visual of an update (data, viewmode, size change).
@@ -68,34 +100,111 @@ export class Visual implements IVisual {
         }
 
         this.currentDataView = options.dataViews[0];
-        if (this.currentDataView.table?.rows?.length > 0) {
-            const columns = this.currentDataView.table.columns;
-            const urnIndex = columns.findIndex(c => c.roles['modelUrn']);
-            const idIndex = columns.findIndex(c => c.roles['elementId']);
 
-            if (urnIndex === -1 || idIndex === -1) {
-                // Data roles not properly mapped
-                return;
-            }
-
-            const rows = this.currentDataView.table.rows;
-            const urns = this.collectDesignUrns(this.currentDataView, urnIndex);
-            if (urns.length > 1) {
-                this.showNotification('Multiple design URNs detected. Only the first one will be displayed.');
-            }
-            if (urns[0] !== this.urn) {
-                this.urn = urns[0];
-                this.updateModel();
-            }
-            this.externalIds = rows.map(r => r[idIndex].valueOf() as string);
-        } else {
-            this.urn = '';
+        // Handle Pagination (Fetch More Data)
+        if (options.operationKind === powerbi.VisualDataChangeOperationKind.Create) {
+            this.allRows = [];
+            this.elementDataMap.clear();
             this.externalIds = [];
-            this.updateModel();
         }
 
-        if (this.idMapping) {
-            await this.syncSelectionState();
+        // 1. Get the Table DataView
+        const dataView = options.dataViews[0];
+        if (!dataView || !dataView.table || !dataView.table.rows) {
+            this.currentUrn = '';
+            this.currentGuid = null;
+            return;
+        }
+
+        // 2. Identify Column Indices
+        const columns = dataView.table.columns;
+        const urnIndex = columns.findIndex(c => c.roles["urn"]);
+        const dbidsIndex = columns.findIndex(c => c.roles["dbids"]);
+        const guidIndex = columns.findIndex(c => c.roles["guid"]);
+        const colorIndex = columns.findIndex(c => c.roles["color"]);
+
+        if (urnIndex === -1) {
+            console.warn('Visual: URN column not found');
+            return;
+        }
+
+        // 3. Process Rows
+        // We accumulate rows to handle pagination
+        this.allRows = this.allRows.concat(dataView.table.rows);
+
+        // Process ONLY the new rows for SelectionId generation
+        dataView.table.rows.forEach((row, rowIndex) => {
+            // Create SelectionId based on the dbids column (primary key)
+            const selectionIdBuilder = this.host.createSelectionIdBuilder();
+
+            if (dbidsIndex !== -1) {
+                selectionIdBuilder.withTable(dataView.table, rowIndex);
+            }
+
+            const selectionId = selectionIdBuilder.createSelectionId();
+            const dbidValue = dbidsIndex !== -1 ? row[dbidsIndex] : null;
+            const colorValue = colorIndex !== -1 ? String(row[colorIndex]) : null;
+
+            // Store in our map
+            if (dbidValue != null) {
+                const key = selectionId.getKey();
+                this.elementDataMap.set(key, {
+                    id: String(dbidValue),
+                    color: colorValue,
+                    selectionId: selectionId
+                });
+
+                // Also keep track of external IDs for mapping later
+                this.externalIds.push(String(dbidValue));
+            }
+        });
+
+        // 4. Handle Model Loading (URN)
+        let modelUrn: string | null = null;
+        if (urnIndex !== -1 && this.allRows.length > 0) {
+            modelUrn = String(this.allRows[0][urnIndex]);
+        }
+
+        // 5. Handle View GUID
+        let viewGuid: string | null = null;
+        if (guidIndex !== -1 && this.allRows.length > 0) {
+            viewGuid = String(this.allRows[0][guidIndex]);
+        }
+
+        // 6. Handle Pagination
+        let isFetching = false;
+        if (this.currentDataView.metadata.segment) {
+            const moreData = this.host.fetchMoreData();
+            if (moreData) {
+                console.log('Visual: Fetching more data...');
+                isFetching = true;
+            }
+        }
+
+        console.log(`Visual: Total rows loaded: ${this.allRows.length}`);
+
+        // Update Status Bar
+        this.statusDiv.style.display = 'block';
+        if (isFetching) {
+            this.statusDiv.innerText = `Rows: ${this.allRows.length} (Loading more...)`;
+            this.statusDiv.style.color = 'yellow';
+        }
+
+        // Initialize Viewer if needed
+        if (modelUrn && modelUrn !== this.currentUrn) {
+            this.currentUrn = modelUrn;
+            this.currentGuid = viewGuid;
+            this.initializeViewer();
+        } else if (viewGuid && viewGuid !== this.currentGuid && this.viewer) {
+            // If URN is same but GUID changed, switch view
+            this.currentGuid = viewGuid;
+            console.log("Visual: View GUID changed to", viewGuid);
+        }
+
+        // 7. Sync Selection & Colors
+        if (this.viewer && this.isViewerReady && this.idMapping) {
+            await this.syncSelectionState(isFetching);
+            await this.syncColors();
         }
     }
 
@@ -150,9 +259,9 @@ export class Visual implements IVisual {
             let region = this.formattingSettings?.viewerCard?.viewerRegion?.value || 'US';
 
             // If no env is explicitly set (or default), try to auto-detect via backend
-            if ((!env || env === 'AutodeskProduction2') && this.urn) {
+            if ((!env || env === 'AutodeskProduction2') && this.currentUrn) {
                 try {
-                    const tokenData = await this.fetchToken(this.urn);
+                    const tokenData = await this.fetchToken(this.currentUrn);
                     if (tokenData && tokenData.detected_env) {
                         env = tokenData.detected_env;
                         console.log(`Smart Init: Backend detected env: ${env}`);
@@ -182,9 +291,10 @@ export class Visual implements IVisual {
             this.container.innerText = '';
             this.viewer = new Autodesk.Viewing.GuiViewer3D(this.container);
             this.viewer.start();
+            this.viewer.loadExtension('Autodesk.VisualClusters');
             this.viewer.addEventListener(Autodesk.Viewing.OBJECT_TREE_CREATED_EVENT, this.onPropertiesLoaded);
             this.viewer.addEventListener(Autodesk.Viewing.SELECTION_CHANGED_EVENT, this.onSelectionChanged);
-            if (this.urn) {
+            if (this.currentUrn) {
                 this.updateModel();
             }
         } catch (err) {
@@ -208,6 +318,8 @@ export class Visual implements IVisual {
             return null;
         }
     }
+
+
 
     /**
      * Retrieves a new access token for the viewer.
@@ -238,18 +350,18 @@ export class Visual implements IVisual {
             return;
         }
 
-        if (this.model && this.model.getData().urn !== this.urn) {
+        if (this.model && this.model.getData().urn !== this.currentUrn) {
             this.viewer.unloadModel(this.model);
             this.model = null;
             this.idMapping = null;
         }
 
         try {
-            if (this.urn) {
-                console.log('Visual: Raw URN:', this.urn);
+            if (this.currentUrn) {
+                console.log('Visual: Raw URN:', this.currentUrn);
 
                 // Sanitize URN: remove whitespace
-                let safeUrn = this.urn.trim();
+                let safeUrn = this.currentUrn.trim();
 
                 // If it starts with 'urn:', strip it for processing
                 if (safeUrn.toLowerCase().startsWith('urn:')) {
@@ -263,7 +375,7 @@ export class Visual implements IVisual {
                     // Check if it's plain text (has :)
                     if (safeUrn.includes(':')) {
                         console.log('Visual: Detected plain text URN, encoding...');
-                        let urnToEncode = this.urn.trim();
+                        let urnToEncode = this.currentUrn.trim();
                         if (!urnToEncode.toLowerCase().startsWith('urn:')) {
                             urnToEncode = 'urn:' + urnToEncode;
                         }
@@ -280,16 +392,16 @@ export class Visual implements IVisual {
                 }
 
                 console.log('Visual: Final Safe URN:', safeUrn);
-                this.model = await loadModel(this.viewer, safeUrn, this.guid);
+                this.model = await loadModel(this.viewer, safeUrn, this.currentGuid);
             }
         } catch (err) {
             let decodedUrn = '';
             try {
-                decodedUrn = atob(this.urn.replace(/-/g, '+').replace(/_/g, '/'));
+                decodedUrn = atob(this.currentUrn.replace(/-/g, '+').replace(/_/g, '/'));
             } catch (e) {
                 decodedUrn = 'Invalid Base64';
             }
-            let msg = `Could not load model. URN: ${this.urn.substring(0, 10)}... Decoded: ${decodedUrn.substring(0, 50)}... `;
+            let msg = `Could not load model. URN: ${this.currentUrn.substring(0, 10)}... Decoded: ${decodedUrn.substring(0, 50)}... `;
             if (err && typeof err === 'object') {
                 if ('code' in err) msg += ` Code: ${err.code}`;
                 if ('message' in err) msg += ` Message: ${err.message}`;
@@ -301,65 +413,197 @@ export class Visual implements IVisual {
         }
     }
 
+    private sampleModelId: string = '';
+
     private async onPropertiesLoaded() {
         this.idMapping = new IdMapping(this.model);
-        await this.syncSelectionState();
-    }
 
-    private async syncSelectionState() {
-        if (!this.idMapping || !this.currentDataView) return;
-
-        const isDataFilterApplied = this.currentDataView.metadata?.isDataFilterApplied;
-
-        // If a filter is applied, we strictly isolate the matching elements.
-        if (isDataFilterApplied && this.externalIds.length > 0) {
-            const dbids = await this.idMapping.getDbids(this.externalIds);
-
-            // Debugging ID mismatch
-            if (dbids.length === 0 && this.externalIds.length > 0) {
-                console.warn('Visual: Filter applied but no matching DbIds found. Check if Element IDs match Model External IDs.');
-            }
-
-            this.viewer.isolate(dbids);
-            this.viewer.fitToView(dbids);
-        } else {
-            // If no filter is applied (or no rows), we show everything.
-            // This protects against ID mismatches hiding the whole model.
-            this.viewer.isolate();
-            this.viewer.fitToView();
+        // DEBUG: Log sample valid IDs from the model to help user fix data mismatch
+        try {
+            // @ts-ignore
+            this.model.getExternalIdMapping((mapping) => {
+                const keys = Object.keys(mapping);
+                if (keys.length > 0) {
+                    this.sampleModelId = keys[0];
+                }
+                console.log(`Visual: Model contains ${keys.length} elements.`);
+                console.log('Visual: Sample VALID Model External IDs (Copy these to your data):', JSON.stringify(keys.slice(0, 5)));
+            });
+        } catch (e) {
+            console.error('Visual: Could not log model IDs', e);
         }
+
+        await this.syncSelectionState(false);
     }
 
-    private async onSelectionChanged() {
-        console.log('Visual: Selection Changed triggered');
-        const allExternalIds = this.currentDataView.table.rows;
-        if (!allExternalIds) {
+
+    private async syncSelectionState(isFetching: boolean) {
+        if (!this.viewer || !this.model) return;
+
+        // If we are fetching more data, show loading status
+        if (isFetching) {
+            this.statusDiv.innerText = `Loading... (${this.allRows.length} rows)`;
+            this.statusDiv.style.color = 'yellow';
             return;
         }
 
-        const columns = this.currentDataView.table.columns;
-        const idIndex = columns.findIndex(c => c.roles['elementId']);
-        if (idIndex === -1) return;
+        const rowCount = this.allRows.length;
+        if (rowCount === 0) {
+            this.statusDiv.innerText = 'No Data Rows';
+            this.statusDiv.style.color = 'white';
+            // Show full model when no data
+            this.viewer.isolate(undefined, this.model);
+            this.viewer.fitToView(undefined, this.model);
+            return;
+        }
+
+        // Check if we have any valid IDs in our map
+        if (this.elementDataMap.size === 0) {
+            this.statusDiv.innerText = 'No IDs mapped';
+            this.statusDiv.style.color = 'orange';
+            // Show full model when no IDs mapped
+            this.viewer.isolate(undefined, this.model);
+            this.viewer.fitToView(undefined, this.model);
+            return;
+        }
+
+        // IMPORTANT: By default, we DON'T isolate anything.
+        // We only isolate if there's an explicit selection/filter from Power BI.
+        // For now, since we're just loading data (not filtering), show the full model.
+
+        // Show full model and update status
+        this.viewer.isolate(undefined, this.model);
+        this.viewer.fitToView(undefined, this.model);
+        this.statusDiv.innerText = `Rows: ${rowCount} | Model Ready`;
+        this.statusDiv.style.color = 'lightgreen';
+
+        console.log(`Visual: Model loaded with ${rowCount} rows. Showing full model.`);
+    }
+
+    private async onSelectionChanged() {
+        if (this.isProgrammaticSelection) return;
 
         const selectedDbids = this.viewer.getSelection();
-        console.log('Visual: Selected DbIds:', selectedDbids);
+        if (selectedDbids.length === 0) {
+            this.selectionManager.clear();
+            this.statusDiv.innerText = `Rows: ${this.allRows.length} | Ready`;
+            this.statusDiv.style.color = 'white';
+            return;
+        }
 
-        const selectedExternalIds = await this.idMapping.getExternalIds(selectedDbids);
-        console.log('Visual: Selected External Ids:', selectedExternalIds);
+        let keysToLookup: string[] = [];
+        keysToLookup.push(...selectedDbids.map(id => id.toString()));
+
+        try {
+            const externalIds = await this.idMapping.getExternalIds(selectedDbids);
+            keysToLookup.push(...externalIds);
+
+            const firstExt = externalIds.length > 0 ? externalIds[0] : 'None';
+            const firstInt = selectedDbids[0];
+            this.statusDiv.innerText = `Selected: ${firstInt} (Int) / ${firstExt} (Ext)`;
+            this.statusDiv.style.color = 'cyan';
+        } catch (e) {
+            console.error('Visual: Error getting external IDs', e);
+        }
 
         const selectionIds: powerbi.extensibility.ISelectionId[] = [];
-        for (const selectedExternalId of selectedExternalIds) {
-            const rowIndex = allExternalIds.findIndex(row => row[idIndex] === selectedExternalId);
-            if (rowIndex !== -1) {
-                const selectionId = this.host.createSelectionIdBuilder()
-                    .withTable(this.currentDataView.table, rowIndex)
-                    .createSelectionId();
-                selectionIds.push(selectionId);
+
+        // Iterate map to find matching keys
+        // Since we changed the map value structure, we need to check the ID inside the object
+        // Wait, the MAP KEY is the SelectionId Key. The VALUE is { id, color, selectionId }.
+        // We need to find the map entry where value.id matches one of our keysToLookup.
+        // This is inefficient (O(N)). We might need a reverse map if performance is bad.
+        // For now, iteration is fine for < 30k rows.
+
+        this.elementDataMap.forEach((data, key) => {
+            if (keysToLookup.includes(data.id)) {
+                selectionIds.push(data.selectionId);
+            }
+        });
+
+        this.selectionManager.select(selectionIds);
+    }
+
+    /**
+     * Applies colors from the Power BI data to the Viewer elements.
+     */
+    private async syncColors() {
+        if (!this.viewer) return;
+
+        this.viewer.clearThemingColors(this.viewer.model);
+        const colorGroups: Map<string, number[]> = new Map();
+
+        // Prepare a list of IDs that need mapping
+        const idsToMap: string[] = [];
+
+        for (const [key, data] of this.elementDataMap) {
+            if (!data.color) continue;
+
+            // If it's already a number, great. If not, we might need to map it.
+            const parsedId = parseInt(data.id);
+            if (isNaN(parsedId)) {
+                idsToMap.push(data.id);
             }
         }
 
-        console.log('Visual: Sending selection to Power BI:', selectionIds);
-        this.selectionManager.select(selectionIds);
+        // Batch map external IDs if needed
+        let mappedIdsMap: Map<string, number> = new Map();
+        if (idsToMap.length > 0 && this.idMapping) {
+            try {
+                const dbIds = await this.idMapping.getDbids(idsToMap);
+                for (let i = 0; i < idsToMap.length; i++) {
+                    if (dbIds[i]) {
+                        mappedIdsMap.set(idsToMap[i], dbIds[i]);
+                    }
+                }
+            } catch (e) {
+                console.error("Visual: Error mapping IDs for colors", e);
+            }
+        }
+
+        // Now assign colors
+        for (const [key, data] of this.elementDataMap) {
+            if (!data.color) continue;
+
+            let dbId: number | null = null;
+            const parsedId = parseInt(data.id);
+
+            if (!isNaN(parsedId)) {
+                dbId = parsedId;
+            } else {
+                // Try to get from our batch mapping
+                const mapped = mappedIdsMap.get(data.id);
+                if (mapped) dbId = mapped;
+            }
+
+            if (dbId !== null) {
+                if (!colorGroups.has(data.color)) {
+                    colorGroups.set(data.color, []);
+                }
+                colorGroups.get(data.color)!.push(dbId);
+            }
+        }
+
+        colorGroups.forEach((dbIds, colorHex) => {
+            const vector = this.hexToVector4(colorHex);
+            if (vector) {
+                dbIds.forEach(dbId => {
+                    this.viewer.setThemingColor(dbId, vector, this.viewer.model);
+                });
+            }
+        });
+    }
+
+    private hexToVector4(hex: string): THREE.Vector4 | null {
+        if (!hex) return null;
+        hex = hex.replace('#', '');
+        if (hex.length === 6) {
+            const r = parseInt(hex.substring(0, 2), 16) / 255;
+            const g = parseInt(hex.substring(2, 4), 16) / 255;
+            const b = parseInt(hex.substring(4, 6), 16) / 255;
+            return new THREE.Vector4(r, g, b, 1);
+        }
+        return null;
     }
 
     private collectDesignUrns(dataView: DataView, urnIndex: number): string[] {

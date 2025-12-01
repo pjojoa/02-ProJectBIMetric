@@ -48,6 +48,36 @@
                         }
                     ]
                 }
+            },
+            "categorical": {
+                "categories": {
+                    "select": [
+                        {
+                            "bind": {
+                                "to": "dbids"
+                            }
+                        }
+                    ]
+                },
+                "values": {
+                    "select": [
+                        {
+                            "bind": {
+                                "to": "urn"
+                            }
+                        },
+                        {
+                            "bind": {
+                                "to": "guid"
+                            }
+                        },
+                        {
+                            "bind": {
+                                "to": "color"
+                            }
+                        }
+                    ]
+                }
             }
         }
     ],

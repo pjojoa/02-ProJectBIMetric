@@ -391,101 +391,10 @@ export function applyDefaultViewerConfiguration(viewer: Autodesk.Viewing.GuiView
     // Set environment to "Plaza" (ID: 8)
     viewer.setLightPreset(8);
 
-    // Reconfigurar toolbar: vertical en el lado derecho, centrado verticalmente respecto al Custom Visual
-    const toolbar = viewer.toolbar;
-    if (toolbar && toolbar.container) {
-        const toolbarContainer = toolbar.container as HTMLElement;
+    // Toolbar mantiene su configuración por defecto (centro, horizontal)
+    // Las extensiones se cargarán automáticamente sin modificar la posición/orientación de la toolbar
 
-        // Función para actualizar la posición del toolbar basándose en el tamaño del contenedor del Custom Visual
-        const updateToolbarPosition = () => {
-            if (!customVisualContainer || !toolbarContainer) return;
-
-            // Obtener las dimensiones del contenedor del Custom Visual
-            const visualHeight = customVisualContainer.clientHeight || customVisualContainer.offsetHeight;
-            const visualWidth = customVisualContainer.clientWidth || customVisualContainer.offsetWidth;
-
-            // Asegurar que el contenedor del Custom Visual tenga posición relativa para que el absolute del toolbar funcione
-            if (window.getComputedStyle(customVisualContainer).position === 'static') {
-                customVisualContainer.style.position = 'relative';
-            }
-
-            // Posicionar el toolbar en la esquina superior derecha
-            toolbarContainer.style.position = 'absolute';
-            toolbarContainer.style.right = '0px';
-            toolbarContainer.style.left = 'auto';
-            toolbarContainer.style.top = '0px';
-            toolbarContainer.style.bottom = 'auto';
-            toolbarContainer.style.zIndex = '1000'; // Asegurar que esté por encima del visor
-            
-            // Escala al 70% del tamaño original
-            toolbarContainer.style.transform = 'scale(0.7)';
-            toolbarContainer.style.transformOrigin = 'top right';
-
-            // Hacerlo vertical (botones en columna)
-            toolbarContainer.style.display = 'flex';
-            toolbarContainer.style.flexDirection = 'column';
-            toolbarContainer.style.alignItems = 'stretch';
-
-            // Dejar que la altura se adapte al contenido y que el escalado controle el tamaño visual
-            toolbarContainer.style.height = 'auto';
-            toolbarContainer.style.width = '56px'; // ancho base antes de escalar
-
-            console.log(`Visual: Toolbar positioned at top-right corner`);
-        };
-
-        // Actualizar posición inicial (con múltiples intentos para asegurar que el toolbar esté renderizado)
-        updateToolbarPosition();
-
-        // Observar cambios en el tamaño del contenedor del Custom Visual (responsive)
-        const customVisualResizeObserver = new ResizeObserver(() => {
-            updateToolbarPosition();
-        });
-        customVisualResizeObserver.observe(customVisualContainer);
-
-        // CRITICAL: Observar cambios en el tamaño del toolbar (cuando las extensiones se cargan, el toolbar puede cambiar de tamaño)
-        const toolbarResizeObserver = new ResizeObserver(() => {
-            updateToolbarPosition();
-        });
-        toolbarResizeObserver.observe(toolbarContainer);
-
-        // CRITICAL: Observar cambios en el DOM del toolbar (las extensiones pueden añadir/remover botones)
-        const toolbarMutationObserver = new MutationObserver(() => {
-            updateToolbarPosition();
-        });
-        toolbarMutationObserver.observe(toolbarContainer, {
-            childList: true,      // Observar cuando se añaden/remueven hijos (botones)
-            subtree: true,        // Observar cambios en todos los descendientes
-            attributes: true,      // Observar cambios en atributos
-            attributeFilter: ['style', 'class'] // Solo observar cambios en style y class
-        });
-
-        // Escuchar eventos del viewer cuando las extensiones se carguen
-        viewer.addEventListener(Autodesk.Viewing.EXTENSION_LOADED_EVENT, () => {
-            console.log('Visual: Extension loaded, updating toolbar position');
-            setTimeout(() => {
-                updateToolbarPosition();
-            }, 100);
-        });
-
-        // También actualizar después de delays para asegurar que el toolbar y las extensiones estén completamente renderizados
-        setTimeout(() => {
-            updateToolbarPosition();
-        }, 100);
-        setTimeout(() => {
-            updateToolbarPosition();
-        }, 500);
-        setTimeout(() => {
-            updateToolbarPosition();
-        }, 1000);
-        setTimeout(() => {
-            updateToolbarPosition();
-        }, 2000); // Delay adicional para extensiones que se cargan más tarde
-        setTimeout(() => {
-            updateToolbarPosition();
-        }, 3000); // Delay adicional para extensiones que se cargan muy tarde
-    }
-
-    console.log('Visual: Applied default viewer configuration (large model mode, Plaza, vertical right toolbar centered)');
+    console.log('Visual: Applied default viewer configuration (large model mode, Plaza, default toolbar)');
 }
 
 export function isolateDbIds(viewer: Autodesk.Viewing.Viewer3D, model: Autodesk.Viewing.Model, dbids: number[]) {

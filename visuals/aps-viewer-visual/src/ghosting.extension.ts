@@ -34,20 +34,36 @@ export function registerGhostingExtension() {
 
         this.button.setToolTip('Objetos fantasma');
 
-        // Create a Pac-Man style ghost icon - simple sheet with eyes
+        // Improved ghost icon with better design and visibility
         const ghostIcon = `
-            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <!-- Ghost body - simple rounded top like a sheet -->
-                <path d="M12 3C8.13 3 5 6.13 5 10c0 2.5 1.25 4.7 3.2 6V20c0 .55.45 1 1 1h3.6v-3h.4v3H16c.55 0 1-.45 1-1v-4c1.95-1.3 3.2-3.5 3.2-6 0-3.87-3.13-7-7-7z" fill="currentColor"/>
-                <!-- Large oval left eye -->
-                <ellipse cx="9" cy="10" rx="2.5" ry="3" fill="#ffffff"/>
-                <!-- Large oval right eye -->
-                <ellipse cx="15" cy="10" rx="2.5" ry="3" fill="#ffffff"/>
-                <!-- Bottom wavy edge - classic Pac-Man ghost style with 3 waves -->
-                <path d="M5 19c1 0 2-.3 3-.3s2 .3 3 .3 2-.3 3-.3 2 .3 3 .3" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/>
+            <svg width="28" height="28" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                <!-- Ghost body (sheet-like with rounded top) -->
+                <path d="M 7 4 Q 12 2 17 4 Q 19 5 19 8 L 19 18 Q 18 17.5 17 18 Q 16 18.5 15 18 Q 14 17.5 13 18 Q 12 18.5 11 18 Q 10 17.5 9 18 Q 8 18.5 7 18 Q 6 17.5 5 18 L 5 8 Q 5 5 7 4 Z" 
+                      fill="currentColor" opacity="0.9"/>
+                
+                <!-- Shadow/depth on right side -->
+                <path d="M 15 4 Q 17.5 4.5 18.5 6.5 Q 19 7.5 19 8 L 19 18 Q 18 17.5 17 18 Q 16.5 18.3 16 18.2 L 16 5.5 Q 15.8 4.5 15 4 Z" 
+                      fill="currentColor" opacity="0.3"/>
+                
+                <!-- Left eye (white background) -->
+                <circle cx="9.5" cy="9.5" r="2" fill="white"/>
+                <!-- Right eye (white background) -->
+                <circle cx="14.5" cy="9.5" r="2" fill="white"/>
+                
+                <!-- Left pupil -->
+                <circle cx="9.7" cy="9.4" r="1.2" fill="#1a1a1a"/>
+                <!-- Right pupil -->
+                <circle cx="14.7" cy="9.4" r="1.2" fill="#1a1a1a"/>
+                
+                <!-- Eye highlights -->
+                <circle cx="9.3" cy="9" r="0.4" fill="white"/>
+                <circle cx="14.3" cy="9" r="0.4" fill="white"/>
+                
+                <!-- Mouth (curved smile) -->
+                <path d="M 10 13 Q 12 14.5 14 13" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" opacity="0.8"/>
             </svg>
         `;
-        
+
         // Set the icon directly
         if (this.button.icon) {
             // eslint-disable-next-line powerbi-visuals/no-inner-outer-html
@@ -56,8 +72,8 @@ export function registerGhostingExtension() {
             this.button.icon.style.display = 'flex';
             this.button.icon.style.alignItems = 'center';
             this.button.icon.style.justifyContent = 'center';
-            this.button.icon.style.width = '24px';
-            this.button.icon.style.height = '24px';
+            this.button.icon.style.width = '28px';
+            this.button.icon.style.height = '28px';
         }
 
         const self = this;
@@ -82,8 +98,14 @@ export function registerGhostingExtension() {
 
     GhostingExtension.prototype.updateButtonState = function (isGhosting: boolean) {
         if (this.button) {
+            // Set button state (ACTIVE = blue background, INACTIVE = default)
             const state = isGhosting ? Autodesk.Viewing.UI.Button.State.ACTIVE : Autodesk.Viewing.UI.Button.State.INACTIVE;
             this.button.setState(state);
+
+            // The icon color is controlled by CSS via 'currentColor'
+            // When ACTIVE, the toolbar automatically applies blue background
+            // The icon will inherit the appropriate color from the button state
+            console.log('Visual: Ghosting button state updated to ' + (isGhosting ? 'ACTIVE (blue)' : 'INACTIVE'));
         }
     };
 

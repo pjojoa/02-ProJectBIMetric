@@ -70,38 +70,26 @@ export function getVisibleNodes(model: Autodesk.Viewing.Model): number[] {
     return dbids;
 }
 
-<<<<<<< HEAD
-=======
 /**
  * Isolates specific elements in the viewer by their dbIds.
  * @param viewer The Autodesk Viewer instance.
- * @param dbIds Array of dbIds to isolate. If empty or undefined, shows all elements.
  * @param model The model to apply isolation to.
+ * @param dbIds Array of dbIds to isolate. If empty or undefined, shows all elements.
  */
-export function isolateDbIds(viewer: Autodesk.Viewing.Viewer3D, dbIds: number[], model?: Autodesk.Viewing.Model): void {
+export function isolateDbIds(viewer: Autodesk.Viewing.Viewer3D, model: Autodesk.Viewing.Model, dbIds: number[]): void {
     if (!viewer || !model) return;
-    
-    if (!dbIds || dbIds.length === 0) {
-        viewer.isolate(undefined, model);
-    } else {
         viewer.isolate(dbIds, model);
-    }
 }
 
 /**
  * Fits the view to show specific elements by their dbIds.
  * @param viewer The Autodesk Viewer instance.
- * @param dbIds Array of dbIds to fit to. If empty or undefined, fits to entire model.
  * @param model The model to apply fit to.
+ * @param dbIds Array of dbIds to fit to. If empty or undefined, fits to entire model.
  */
-export function fitToView(viewer: Autodesk.Viewing.Viewer3D, dbIds: number[], model?: Autodesk.Viewing.Model): void {
+export function fitToView(viewer: Autodesk.Viewing.Viewer3D, model: Autodesk.Viewing.Model, dbIds?: number[]): void {
     if (!viewer || !model) return;
-    
-    if (!dbIds || dbIds.length === 0) {
-        viewer.fitToView(undefined, model);
-    } else {
         viewer.fitToView(dbIds, model);
-    }
 }
 
 /**
@@ -109,7 +97,7 @@ export function fitToView(viewer: Autodesk.Viewing.Viewer3D, dbIds: number[], mo
  * @param viewer The Autodesk Viewer instance.
  * @param model The model to apply show all to.
  */
-export function showAll(viewer: Autodesk.Viewing.Viewer3D, model?: Autodesk.Viewing.Model): void {
+export function showAll(viewer: Autodesk.Viewing.Viewer3D, model: Autodesk.Viewing.Model): void {
     if (!viewer || !model) return;
     viewer.isolate(undefined, model);
     viewer.fitToView(undefined, model);
@@ -120,7 +108,6 @@ export function showAll(viewer: Autodesk.Viewing.Viewer3D, model?: Autodesk.View
  * typically used by the Viewer APIs) and "external IDs" (typically based on persistent IDs
  * from the authoring application, for example, Revit GUIDs).
  */
->>>>>>> 637fefe79f416cc605a6e8b3d4f2c4a2a103b2da
 export class IdMapping {
     private readonly externalIdMappingPromise: Promise<{ [externalId: string]: number; }>;
     private readonly reverseMappingPromise: Promise<{ [dbid: number]: string; }>;
@@ -395,17 +382,4 @@ export function applyDefaultViewerConfiguration(viewer: Autodesk.Viewing.GuiView
     // Las extensiones se cargarán automáticamente sin modificar la posición/orientación de la toolbar
 
     console.log('Visual: Applied default viewer configuration (large model mode, Plaza, default toolbar)');
-}
-
-export function isolateDbIds(viewer: Autodesk.Viewing.Viewer3D, model: Autodesk.Viewing.Model, dbids: number[]) {
-    viewer.isolate(dbids, model);
-}
-
-export function fitToView(viewer: Autodesk.Viewing.Viewer3D, model: Autodesk.Viewing.Model, dbids?: number[]) {
-    viewer.fitToView(dbids, model);
-}
-
-export function showAll(viewer: Autodesk.Viewing.Viewer3D, model: Autodesk.Viewing.Model) {
-    viewer.isolate(undefined, model);
-    viewer.fitToView(undefined, model);
 }

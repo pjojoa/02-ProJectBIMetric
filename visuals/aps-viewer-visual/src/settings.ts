@@ -17,9 +17,9 @@ class ViewerCard extends Card {
     viewerEnv = new formattingSettings.TextInput({
         name: 'viewerEnv',
         displayName: 'Viewer Environment',
-        description: 'AutodeskProduction2 (SVF2) or AutodeskProduction (SVF)',
-        placeholder: 'AutodeskProduction2',
-        value: 'AutodeskProduction2'
+        description: 'AutodeskProduction (Universal) or AutodeskProduction2 (SVF2 only)',
+        placeholder: 'AutodeskProduction',
+        value: 'AutodeskProduction'
     });
     viewerRegion = new formattingSettings.TextInput({
         name: 'viewerRegion',
@@ -28,9 +28,28 @@ class ViewerCard extends Card {
         placeholder: 'US',
         value: 'US'
     });
+    performanceProfile = new formattingSettings.ItemDropdown({
+        name: 'performanceProfile',
+        displayName: 'Performance Profile',
+        description: 'Select performance profile for the viewer',
+        value: {
+            value: 'HighPerformance',
+            displayName: 'High Performance'
+        },
+        items: [
+            {
+                value: 'HighPerformance',
+                displayName: 'High Performance'
+            },
+            {
+                value: 'Balanced',
+                displayName: 'Balanced'
+            }
+        ]
+    });
     name: string = 'viewer';
     displayName: string = 'Viewer Runtime';
-    slices: Array<Slice> = [this.accessTokenEndpoint, this.viewerEnv, this.viewerRegion];
+    slices: Array<Slice> = [this.accessTokenEndpoint, this.viewerEnv, this.viewerRegion, this.performanceProfile];
 }
 
 export class VisualSettingsModel extends Model {

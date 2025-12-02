@@ -1,22 +1,46 @@
+/*
+*  Power BI Visual CLI
+*
+*  Copyright (c) Microsoft Corporation
+*  All rights reserved.
+*  MIT License
+*
+*  Permission is hereby granted, free of charge, to any person obtaining a copy
+*  of this software and associated documentation files (the ""Software""), to deal
+*  in the Software without restriction, including without limitation the rights
+*  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+*  copies of the Software, and to permit persons to whom the Software is
+*  furnished to do so, subject to the following conditions:
+*
+*  The above copyright notice and this permission notice shall be included in
+*  all copies or substantial portions of the Software.
+*
+*  THE SOFTWARE IS PROVIDED *AS IS*, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+*  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+*  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+*  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+*  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+*  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+*  THE SOFTWARE.
+*/
 'use strict';
 
-import powerbi from 'powerbi-visuals-api';
-import { FormattingSettingsService } from 'powerbi-visuals-utils-formattingmodel';
-import '../style/visual.less';
+import "./../style/visual.less";
+import powerbi from "powerbi-visuals-api";
+import { VisualSettingsModel } from "./settings";
+import { FormattingSettingsService } from "powerbi-visuals-utils-formattingmodel";
+import { initializeViewerRuntime, loadModel, IdMapping, launchViewer, isolateDbIds, fitToView, showAll } from "./viewer.utils";
+import * as models from "powerbi-models";
 
+import IVisual = powerbi.extensibility.visual.IVisual;
 import VisualConstructorOptions = powerbi.extensibility.visual.VisualConstructorOptions;
 import VisualUpdateOptions = powerbi.extensibility.visual.VisualUpdateOptions;
-import IVisual = powerbi.extensibility.visual.IVisual;
 import IVisualHost = powerbi.extensibility.visual.IVisualHost;
 import ISelectionManager = powerbi.extensibility.ISelectionManager;
+import ISelectionId = powerbi.visuals.ISelectionId;
 import DataView = powerbi.DataView;
+import DataViewTableRow = powerbi.DataViewTableRow;
 
-import { VisualSettingsModel } from './settings';
-import { initializeViewerRuntime, loadModel, IdMapping } from './viewer.utils';
-
-/**
- * Custom visual wrapper for the Autodesk Platform Services Viewer.
- */
 export class Visual implements IVisual {
     // Visual state
     private host: IVisualHost;
@@ -26,87 +50,74 @@ export class Visual implements IVisual {
     private formattingSettingsService: FormattingSettingsService;
     private currentDataView: DataView = null;
     private selectionManager: ISelectionManager = null;
-    private isProgrammaticSelection: boolean = false;
+
+    // Flags for interaction pattern
+    private isDbIdSelectionActive: boolean = false;
+    private lastFilteredIds: string[] | null = null; // Track last filtered IDs to detect state changes
+    private allDbIds: string[] | null = null; // Using string because we store IDs as strings in elementDataMap
+    private pendingSelection: string[] | null = null; // Store selection to apply when viewer is ready
+    private isProgrammaticSelection: boolean = false; // Prevent handleDbIds from firing when selection is programmatic
 
     // Visual inputs
     private accessTokenEndpoint: string = '';
 
     private currentUrn: string = "";
     private currentGuid: string | null = null;
-    private viewer: Autodesk.Viewing.GuiViewer3D;
-    private isViewerReady: boolean = false;
-
-    // Map SelectionId Key -> { id: string, color: string | null, selectionId: ISelectionId }
-    private elementDataMap: Map<string, { id: string, color: string | null, selectionId: powerbi.visuals.ISelectionId }> = new Map();
-
-    // Store all external IDs (or DbIds) from the dataset for bulk mapping
-    private externalIds: string[] = [];
-
-    // Viewer runtime
+    private viewer: Autodesk.Viewing.Viewer3D = null;
     private model: Autodesk.Viewing.Model = null;
     private idMapping: IdMapping = null;
+    private isViewerReady: boolean = false;
 
-    /**
-     * Initializes the viewer visual.
-     * @param options Additional visual initialization options.
-     */
+    // Data Storage
+    private allRows: DataViewTableRow[] = [];
+    private elementDataMap: Map<string, { id: string, color: string | null, selectionId: ISelectionId }> = new Map();
+    private externalIds: string[] = []; // For mapping
+    private dbIdToColumnValueMap: Map<number, string> = new Map(); // Map dbId -> column value (for filtering)
+
     constructor(options: VisualConstructorOptions) {
         this.host = options.host;
-        this.selectionManager = options.host.createSelectionManager();
         this.formattingSettingsService = new FormattingSettingsService();
-        this.container = options.element;
+        this.selectionManager = this.host.createSelectionManager();
 
-        // Create Status Bar for on-screen debugging
+        // Register callback for when other visuals change selection
+        // This is the PRIMARY way to detect cross-filtering from other visuals
+        this.selectionManager.registerOnSelectCallback(() => {
+            console.log('Visual: SelectionManager callback fired - another visual changed selection');
+            // The update() method will be called automatically by Power BI after this
+            // We'll handle the actual filtering logic there
+        });
+
+        // Create container
+        this.container = document.createElement('div');
+        this.container.id = 'forge-viewer';
+        this.container.style.width = '100%';
+        this.container.style.height = 'calc(100% - 20px)';
+        this.container.style.position = 'relative';
+        options.element.appendChild(this.container);
+
+        // Status bar
         this.statusDiv = document.createElement('div');
-        this.statusDiv.style.position = 'absolute';
-        this.statusDiv.style.bottom = '5px';
-        this.statusDiv.style.left = '5px';
+        this.statusDiv.style.height = '20px';
+        this.statusDiv.style.backgroundColor = '#333';
         this.statusDiv.style.color = 'white';
-        this.statusDiv.style.backgroundColor = 'rgba(0, 0, 0, 0.7)';
-        this.statusDiv.style.padding = '5px';
         this.statusDiv.style.fontSize = '12px';
-        this.statusDiv.style.zIndex = '999';
-        this.statusDiv.style.pointerEvents = 'none';
-        this.statusDiv.style.display = 'none'; // Hidden by default, shown when data present
-        this.container.appendChild(this.statusDiv);
-
-        this.getAccessToken = this.getAccessToken.bind(this);
-        this.onPropertiesLoaded = this.onPropertiesLoaded.bind(this);
-        this.onSelectionChanged = this.onSelectionChanged.bind(this);
+        this.statusDiv.style.padding = '2px 5px';
+        this.statusDiv.innerText = 'Initializing...';
+        options.element.appendChild(this.statusDiv);
     }
 
-
-
     /**
-     * Notifies the viewer visual of an update (data, viewmode, size change).
-     * @param options Additional visual update options.
-     */
-    private allRows: powerbi.DataViewTableRow[] = [];
-
-    /**
-     * Notifies the viewer visual of an update (data, viewmode, size change).
-     * @param options Additional visual update options.
+     * Notifies the visual of an update (data, viewmode, size change).
      */
     public async update(options: VisualUpdateOptions): Promise<void> {
-        // this.logVisualUpdateOptions(options);
-
         this.formattingSettings = this.formattingSettingsService.populateFormattingSettingsModel(VisualSettingsModel, options.dataViews[0]);
         const { accessTokenEndpoint } = this.formattingSettings.viewerCard;
         if (accessTokenEndpoint.value !== this.accessTokenEndpoint) {
             this.accessTokenEndpoint = accessTokenEndpoint.value;
-            if (!this.viewer) {
-                this.initializeViewer();
-            }
+            // If endpoint changes, we might need to re-init, but for now just update prop
         }
 
         this.currentDataView = options.dataViews[0];
-
-        // Handle Pagination (Fetch More Data)
-        if (options.operationKind === powerbi.VisualDataChangeOperationKind.Create) {
-            this.allRows = [];
-            this.elementDataMap.clear();
-            this.externalIds = [];
-        }
 
         // 1. Get the Table DataView
         const dataView = options.dataViews[0];
@@ -128,522 +139,765 @@ export class Visual implements IVisual {
             return;
         }
 
-        // 3. Process Rows
-        // We accumulate rows to handle pagination
-        this.allRows = this.allRows.concat(dataView.table.rows);
+        // 3. Handle Pagination and Data Accumulation
+        const isCreate = options.operationKind === powerbi.VisualDataChangeOperationKind.Create;
+        const isAppend = options.operationKind === powerbi.VisualDataChangeOperationKind.Append;
+        const hasSegment = this.currentDataView?.metadata?.segment != null;
 
-        // Process ONLY the new rows for SelectionId generation
+        // Check if data is filtered BEFORE processing
+        const isDataFilterApplied = this.currentDataView.metadata && this.currentDataView.metadata.isDataFilterApplied === true;
+
+        // CRITICAL: Only reset on Create if there's NO filter applied
+        // When Power BI applies a filter, it sends Create operation, but we need to preserve the full dataset
+        if (isCreate && !isDataFilterApplied) {
+            // Fresh start - no filter, so reset everything
+            console.log('Visual: Create operation without filter - resetting all data');
+            this.allRows = [];
+            this.elementDataMap.clear();
+            this.externalIds = [];
+            this.allDbIds = null;
+            this.dbIdToColumnValueMap.clear();
+        } else if (isCreate && isDataFilterApplied) {
+            // Create with filter - preserve existing full dataset
+            console.log('Visual: Create operation WITH filter - preserving existing full dataset');
+            // Don't reset allRows, externalIds, or allDbIds
+        }
+
+        // Process current visible rows FIRST to get currentBatchIds
+        // These are the filtered rows if filter is applied, or all rows if not
+        const currentBatchIds: string[] = [];
+        const currentRowSet = new Set<string>(); // Track unique IDs in current batch
+
         dataView.table.rows.forEach((row, rowIndex) => {
-            // Create SelectionId based on the dbids column (primary key)
             const selectionIdBuilder = this.host.createSelectionIdBuilder();
-
             if (dbidsIndex !== -1) {
                 selectionIdBuilder.withTable(dataView.table, rowIndex);
             }
-
             const selectionId = selectionIdBuilder.createSelectionId();
             const dbidValue = dbidsIndex !== -1 ? row[dbidsIndex] : null;
             const colorValue = colorIndex !== -1 ? String(row[colorIndex]) : null;
 
-            // Store in our map
             if (dbidValue != null) {
                 const key = selectionId.getKey();
+                const idString = String(dbidValue);
+
+                // Update or add to elementDataMap (always, for selection mapping)
                 this.elementDataMap.set(key, {
-                    id: String(dbidValue),
+                    id: idString,
                     color: colorValue,
                     selectionId: selectionId
                 });
 
-                // Also keep track of external IDs for mapping later
-                this.externalIds.push(String(dbidValue));
+                // Add to current batch IDs (for filtering) - only if not already added
+                if (!currentRowSet.has(idString)) {
+                    currentBatchIds.push(idString);
+                    currentRowSet.add(idString);
+                }
             }
         });
 
+        // Accumulate rows and IDs - ONLY when NOT filtered
+        // This builds the full dataset during initial load and pagination
+        if (!isDataFilterApplied) {
+            // No filter: accumulate all rows to build full dataset (handles pagination)
+            this.allRows = this.allRows.concat(dataView.table.rows);
+
+            // Accumulate unique IDs to externalIds
+            currentBatchIds.forEach(idString => {
+                if (!this.externalIds.includes(idString)) {
+                    this.externalIds.push(idString);
+                }
+            });
+
+            // Update allDbIds with accumulated externalIds (represents full dataset)
+            this.allDbIds = this.externalIds.slice(); // Create a copy of full dataset
+
+            console.log(`Visual: Accumulated data - allRows: ${this.allRows.length}, externalIds: ${this.externalIds.length}`);
+        }
+        // When filtered: 
+        // - allRows and externalIds remain as the last known full dataset (preserved from above)
+        // - currentBatchIds contains the filtered IDs (use these for highlighting)
+
         // 4. Handle Model Loading (URN)
+        // Use current dataView rows for URN/GUID (works even when filtered)
         let modelUrn: string | null = null;
-        if (urnIndex !== -1 && this.allRows.length > 0) {
-            modelUrn = String(this.allRows[0][urnIndex]);
+        if (urnIndex !== -1 && dataView.table.rows.length > 0) {
+            modelUrn = String(dataView.table.rows[0][urnIndex]);
         }
 
         // 5. Handle View GUID
         let viewGuid: string | null = null;
-        if (guidIndex !== -1 && this.allRows.length > 0) {
-            viewGuid = String(this.allRows[0][guidIndex]);
+        if (guidIndex !== -1 && dataView.table.rows.length > 0) {
+            viewGuid = String(dataView.table.rows[0][guidIndex]);
         }
 
-        // 6. Handle Pagination
+        // 6. Handle Pagination Fetch
         let isFetching = false;
         if (this.currentDataView.metadata.segment) {
             const moreData = this.host.fetchMoreData();
             if (moreData) {
-                console.log('Visual: Fetching more data...');
                 isFetching = true;
+                this.statusDiv.innerText = `Loading... (${this.allRows.length} rows, ${this.externalIds.length} unique IDs)`;
+                this.statusDiv.style.color = 'yellow';
+            } else {
+                // Pagination complete
+                this.statusDiv.innerText = `Rows: ${this.allRows.length} | IDs: ${this.externalIds.length} | Ready`;
+                this.statusDiv.style.color = 'lightgreen';
             }
+        } else {
+            // Show both total rows and unique IDs
+            const uniqueIdCount = this.externalIds.length;
+            this.statusDiv.innerText = `Rows: ${this.allRows.length} | IDs: ${uniqueIdCount} | Ready`;
+            this.statusDiv.style.color = 'white';
         }
 
-        console.log(`Visual: Total rows loaded: ${this.allRows.length}`);
-
-        // Update Status Bar
-        this.statusDiv.style.display = 'block';
-        if (isFetching) {
-            this.statusDiv.innerText = `Rows: ${this.allRows.length} (Loading more...)`;
-            this.statusDiv.style.color = 'yellow';
-        }
-
-        // Initialize Viewer if needed
+        // 7. Initialize Viewer if needed
         if (modelUrn && modelUrn !== this.currentUrn) {
             this.currentUrn = modelUrn;
             this.currentGuid = viewGuid;
-            this.initializeViewer();
+            await this.initializeViewer();
         } else if (viewGuid && viewGuid !== this.currentGuid && this.viewer) {
-            // If URN is same but GUID changed, switch view
             this.currentGuid = viewGuid;
             console.log("Visual: View GUID changed to", viewGuid);
+            // TODO: Implement view switching logic if needed
         }
 
-        // 7. Sync Selection & Colors
-        if (this.viewer && this.isViewerReady && this.idMapping) {
-            await this.syncSelectionState(isFetching);
+        // 8. INCOMING FILTER LOGIC (Power BI -> Viewer)
+        // Simplified logic with three clear states:
+        // 1. External filter active: isDataFilterApplied === true AND !isDbIdSelectionActive
+        // 2. Filter cleared: isDataFilterApplied === false AND lastFilteredIds !== null
+        // 3. No filter (initial): isDataFilterApplied === false AND lastFilteredIds === null
+
+        // Determine if we're still paginating (Create is NOT pagination unless it has segment, Append is pagination)
+        // In Power BI, 'Create' operation usually means "new data view", which can be initial load or a filter change.
+        // 'Append' means more data for the same view (pagination).
+        const isPaginating = isAppend || hasSegment;
+
+        // Detect filter by row count: if we have less rows than total known externalIds, it might be a filter
+        // This helps when isDataFilterApplied is not reliable or when cross-filtering reduces row count
+        const hasFilterByCount = 
+            currentBatchIds.length > 0 && 
+            this.externalIds.length > 0 && 
+            currentBatchIds.length !== this.externalIds.length;
+
+        // Determine if there's an external filter (from another visual)
+        // External filter = we didn't initiate it AND (data is filtered metadata OR row count is reduced)
+        // We exclude pagination to avoid flickering during data load
+        const isExternalFilter = 
+            !this.isDbIdSelectionActive && 
+            !isPaginating && 
+            (isDataFilterApplied || hasFilterByCount);
+
+        // Get the IDs to isolate
+        const idsToIsolate = isExternalFilter ? currentBatchIds : [];
+
+        // Detect state transitions
+        const wasFiltered = this.lastFilteredIds !== null;
+        
+        // Filter cleared = was filtered, and now no filter is active (metadata false AND count matches full dataset)
+        const isFilterCleared = 
+            wasFiltered && 
+            !this.isDbIdSelectionActive && 
+            !isDataFilterApplied && 
+            !hasFilterByCount;
+
+        // Enhanced logging
+        console.log(`Visual: ========== FILTER DETECTION DEBUG ==========`);
+        console.log(`Visual: operationKind: ${options.operationKind}, type: ${options.type}`);
+        console.log(`Visual: isCreate: ${isCreate}, isAppend: ${isAppend}, hasSegment: ${hasSegment}`);
+        console.log(`Visual: isDataFilterApplied (from metadata): ${isDataFilterApplied}`);
+        console.log(`Visual: isDbIdSelectionActive (internal flag): ${this.isDbIdSelectionActive}`);
+        console.log(`Visual: isPaginating: ${isPaginating}`);
+        console.log(`Visual: hasFilterByCount: ${hasFilterByCount} (current: ${currentBatchIds.length}, total: ${this.externalIds.length})`);
+        console.log(`Visual: Filter detection - isExternalFilter: ${isExternalFilter}`);
+        console.log(`Visual: State transition - wasFiltered: ${wasFiltered}, isFilterCleared: ${isFilterCleared}`);
+        console.log(`Visual: Data counts - idsToIsolate: ${idsToIsolate.length}, currentBatchIds: ${currentBatchIds.length}, allRows: ${this.allRows.length}, externalIds: ${this.externalIds.length}`);
+        console.log(`Visual: Viewer state - viewer exists: ${!!this.viewer}, isViewerReady: ${this.isViewerReady}, idMapping exists: ${!!this.idMapping}`);
+        console.log(`Visual: ============================================`);
+
+        if (isDataFilterApplied && currentBatchIds.length > 0) {
+            console.log(`Visual: Filtered data - Total IDs: ${currentBatchIds.length}, Sample (first 10):`, currentBatchIds.slice(0, 10));
+        }
+        
+        if (currentBatchIds.length > 0 && currentBatchIds.length !== this.externalIds.length) {
+            console.log(`Visual: POTENTIAL FILTER: currentBatchIds (${currentBatchIds.length}) differs from externalIds (${this.externalIds.length})`);
+        }
+
+        // Wait for viewer to be ready before processing filters
+        if (!this.viewer || !this.isViewerReady || !this.idMapping) {
+            // Store pending selection to apply when viewer is ready
+            if (isExternalFilter && idsToIsolate.length > 0) {
+                console.log(`Visual: Viewer not ready, storing ${idsToIsolate.length} IDs for later application...`);
+                this.pendingSelection = idsToIsolate;
+                this.lastFilteredIds = idsToIsolate;
+            }
+            return; // Exit early if viewer not ready
+        }
+
+        // STATE 1: External filter active - Isolate and highlight filtered elements
+        // We check !isPaginating to avoid isolating partial data during load
+        if (isExternalFilter && idsToIsolate.length > 0 && !isPaginating) {
+            console.log(`Visual: External filter detected! Processing ${idsToIsolate.length} IDs to isolate.`);
+
+            // Set flag to prevent selection loop
+            this.isProgrammaticSelection = true;
+
+            // Reset isDbIdSelectionActive when filter comes from external source
+            this.isDbIdSelectionActive = false;
+
+            // Apply filter (isolate, highlight with neon green, and fit to view)
+            await this.syncSelectionState(true, idsToIsolate);
+
+            // Track filtered IDs for state transition detection
+            this.lastFilteredIds = idsToIsolate.slice();
+
+            // Reset flag after operation
+            this.isProgrammaticSelection = false;
+
+            console.log(`Visual: Filter applied successfully, ${idsToIsolate.length} elements isolated and highlighted`);
+        }
+        // STATE 2: Filter cleared - Show all elements and restore original colors
+        else if (isFilterCleared) {
+            console.log(`Visual: Filter cleared detected! Showing all elements and restoring original state...`);
+
+            // Set flag to prevent selection loop
+            this.isProgrammaticSelection = true;
+
+            // Clear isolation and selection
+            this.viewer.clearSelection();
+            this.viewer.clearThemingColors(this.model);
+            showAll(this.viewer, this.model);
+
+            // Reset state tracking
+            this.lastFilteredIds = null;
+            this.isDbIdSelectionActive = false;
+
+            // Restore original colors from data
             await this.syncColors();
+
+            // Reset flag after operation
+            this.isProgrammaticSelection = false;
+
+            console.log(`Visual: Filter cleared successfully, showing all ${this.externalIds.length} elements`);
+        }
+        // STATE 3: No filter (initial state or no change) - Sync colors if needed
+        else if (!isDataFilterApplied && !this.isDbIdSelectionActive && !isPaginating) {
+            // Only sync colors if we're not in the middle of pagination
+            // and there's no active selection from viewer or external filter
+            if (this.lastFilteredIds === null) {
+                // Initial state - sync colors once
+                console.log(`Visual: Initial state - syncing colors for ${this.externalIds.length} elements`);
+                await this.syncColors();
+            }
         }
     }
 
-    /**
-     * Returns properties pane formatting model content hierarchies, properties and latest formatting values, Then populate properties pane.
-     * This method is called once every time we open properties pane or when the user edit any format property. 
-     */
-    public getFormattingModel(): powerbi.visuals.FormattingModel {
-        return this.formattingSettingsService.buildFormattingModel(this.formattingSettings);
-    }
-
-    /**
-     * Displays a notification that will automatically disappear after some time.
-     * @param content HTML content to display inside the notification.
-     */
-    private showNotification(content: string): void {
-        let notifications = this.container.querySelector('#notifications');
-        if (!notifications) {
-            notifications = document.createElement('div');
-            notifications.id = 'notifications';
-            this.container.appendChild(notifications);
-        }
-        const notification = document.createElement('div');
-        notification.className = 'notification';
-        notification.innerText = content;
-        notifications.appendChild(notification);
-        setTimeout(() => notifications.removeChild(notification), 5000);
-    }
-
-    /**
-     * Initializes the viewer runtime.
-     */
     private async initializeViewer(): Promise<void> {
         try {
-            // Shim localStorage and sessionStorage to prevent SecurityError in Power BI sandbox
-            try {
-                const _test = window.localStorage;
-            } catch (e) {
-                console.warn('Storage access denied. Shimming...');
-                const storageShim = {
-                    getItem: () => null,
-                    setItem: () => { },
-                    removeItem: () => { },
-                    clear: () => { }
-                };
-                Object.defineProperty(window, 'localStorage', { value: storageShim, writable: true });
-                Object.defineProperty(window, 'sessionStorage', { value: storageShim, writable: true });
+            const token = await this.fetchToken(this.currentUrn);
+            if (!token) return;
+
+            // Get performance profile from settings
+            const profile = this.formattingSettings.viewerCard.performanceProfile.value.value as 'HighPerformance' | 'Balanced';
+
+            // Get environment from settings
+            const env = this.formattingSettings.viewerCard.viewerEnv.value;
+            // Determine API based on Env (SVF2 -> streamingV2, SVF -> derivativeV2)
+            const api = env === 'AutodeskProduction2' ? 'streamingV2' : 'derivativeV2';
+
+            // Use the new launchViewer from utils
+            const result = await launchViewer(
+                this.container,
+                this.currentUrn,
+                token.access_token,
+                this.currentGuid,
+                (ids) => this.handleDbIds(ids), // Callback for selection
+                profile, // Pass performance profile
+                env, // Pass environment
+                api // Pass API
+            );
+
+            this.viewer = result.viewer;
+            this.model = result.model;
+            this.idMapping = new IdMapping(this.model);
+            this.isViewerReady = true;
+
+            console.log("Visual: Viewer initialized successfully with profile:", profile);
+
+            // CRITICAL: Build reverse mapping (dbId -> column value) for all loaded data
+            // This allows us to map selected dbIds back to the values in Power BI column
+            await this.buildReverseMapping();
+
+            // Initial sync
+            await this.syncColors();
+
+            // Apply pending selection if any
+            if (this.pendingSelection && this.pendingSelection.length > 0) {
+                console.log(`Visual: Applying pending selection after viewer initialization: ${this.pendingSelection.length} IDs`);
+                await this.syncSelectionState(true, this.pendingSelection);
+                this.pendingSelection = null;
             }
 
-            // Smart Environment Detection via Backend
-            let env = this.formattingSettings?.viewerCard?.viewerEnv?.value;
-            let region = this.formattingSettings?.viewerCard?.viewerRegion?.value || 'US';
+        } catch (error) {
+            console.error("Visual: Error initializing viewer", error);
+            this.statusDiv.innerText = "Error loading viewer";
+            this.statusDiv.style.color = "red";
+        }
+    }
 
-            // If no env is explicitly set (or default), try to auto-detect via backend
-            if ((!env || env === 'AutodeskProduction2') && this.currentUrn) {
-                try {
-                    const tokenData = await this.fetchToken(this.currentUrn);
-                    if (tokenData && tokenData.detected_env) {
-                        env = tokenData.detected_env;
-                        console.log(`Smart Init: Backend detected env: ${env}`);
-                    }
-                    if (tokenData && tokenData.detected_region) {
-                        region = tokenData.detected_region;
-                        console.log(`Smart Init: Backend detected region: ${region}`);
-                    }
-                } catch (e) {
-                    console.warn('Smart Init failed, falling back to default env', e);
+    /**
+     * Handles selection changes from the Viewer (Viewer -> Power BI)
+     */
+    private async handleDbIds(selectedDbIds: number[]) {
+        if (!this.host) return;
+
+        // Skip if this selection change came from programmatic selection (external filter)
+        if (this.isProgrammaticSelection) {
+            console.log("Visual: Ignoring programmatic selection change:", selectedDbIds.length, "IDs");
+            return;
+        }
+
+        console.log("Visual: Selection changed in viewer (user interaction):", selectedDbIds);
+
+        // 1. If no selection, clear filters
+        if (selectedDbIds.length === 0) {
+            this.host.applyJsonFilter(null, "general", "filter", powerbi.FilterAction.merge);
+            this.isDbIdSelectionActive = false;
+            return;
+        }
+
+        // 2. If selection, apply JSON filter
+        // We need to find the target column for 'dbids' role
+        if (!this.currentDataView || !this.currentDataView.table) return;
+
+        const columns = this.currentDataView.table.columns;
+        const dbidsIndex = columns.findIndex(c => c.roles["dbids"]);
+
+        if (dbidsIndex === -1) return;
+
+        const columnSource = columns[dbidsIndex];
+        // Note: queryName is usually "Table.Column"
+        
+        // Try to get table and column names
+        let target: models.IFilterColumnTarget;
+
+        if (columnSource.queryName) {
+            // Prefer queryName parsing for robustness
+            const parts = columnSource.queryName.split('.');
+            if (parts.length >= 2) {
+                target = {
+                    table: parts[0],
+                    column: parts[1] // Basic splitting
+                };
+            } else {
+                target = {
+                    table: columnSource.queryName, 
+                    column: columnSource.displayName
+                };
+            }
+        } else {
+            // Fallback
+            target = {
+                table: "Data", 
+                column: columnSource.displayName
+            };
+        }
+
+        // CRITICAL: Map DbIds to the exact values in the Power BI column
+        // Since the column contains dbId values (as strings), we map: dbId (number) -> dbId (string)
+        // We rely on dbIdToColumnValueMap built during update, or check against externalIds directly.
+        let filterValues: string[] = [];
+        let missingIds: number[] = [];
+
+        for (const dbId of selectedDbIds) {
+            // 1. Try reverse map
+            const columnValue = this.dbIdToColumnValueMap.get(dbId);
+            if (columnValue) {
+                filterValues.push(columnValue);
+            } else {
+                // 2. Fallback: check if the stringified dbId exists in our known dataset
+                const dbIdStr = String(dbId);
+                if (this.externalIds.includes(dbIdStr)) {
+                    filterValues.push(dbIdStr);
+                } else {
+                    missingIds.push(dbId);
+                }
+            }
+        }
+
+        console.log(`Visual: Mapped ${selectedDbIds.length} DbIds to ${filterValues.length} column values for filtering`);
+        
+        if (missingIds.length > 0) {
+            console.warn(`Visual: Warning - Selected DbIds [${missingIds.slice(0, 5)}...] do not exist in Power BI data column. Filter will ignore them.`);
+        }
+
+        if (filterValues.length > 0) {
+            console.log(`Visual: Filter values (first 10):`, filterValues.slice(0, 10));
+            
+            const filter = new models.BasicFilter(
+                target,
+                "In",
+                filterValues
+            );
+
+            console.log("Visual: Applying JSON filter:", filter);
+            this.host.applyJsonFilter(filter, "general", "filter", powerbi.FilterAction.merge);
+            this.isDbIdSelectionActive = true;
+        } else {
+            console.warn("Visual: No valid filter values found for selection. Skipping filter application to avoid empty results.");
+            // We do NOT clear filter here to avoid resetting other visuals to 'All' when clicking empty space or invalid objects.
+            // If user wants to clear, they click empty space -> selectedDbIds.length === 0 handled above.
+        }
+    }
+
+    /**
+     * Build reverse mapping from dbId (number) to column value (string)
+     * Since the column contains dbId values directly, we map: dbId (number) -> dbId (string from column)
+     * This is critical for filtering: when user selects an element in viewer (dbId),
+     * we need to map it back to the exact string value in Power BI column
+     */
+    private async buildReverseMapping(): Promise<void> {
+        if (!this.idMapping || !this.externalIds || this.externalIds.length === 0) {
+            console.log("Visual: buildReverseMapping - No data available yet");
+            return;
+        }
+
+        console.log(`Visual: buildReverseMapping - Building reverse mapping for ${this.externalIds.length} dbId values from column`);
+
+        try {
+            // Map all column values (which are dbIds as strings) to actual dbIds (numbers)
+            // This validates that the column values are valid dbIds in the model
+            const dbIds = await this.idMapping.smartMapToDbIds(this.externalIds);
+            
+            // Build reverse mapping: dbId (number) -> dbId (string from column)
+            // This allows us to map selected dbIds back to the exact string in the column
+            // Clear existing map to avoid stale data
+            this.dbIdToColumnValueMap.clear();
+            
+            for (let i = 0; i < this.externalIds.length; i++) {
+                const columnValue = this.externalIds[i]; // This is the dbId as string from Power BI column
+                if (i < dbIds.length && dbIds[i] != null) {
+                    // Map: dbId (number from viewer) -> dbId (string from column)
+                    this.dbIdToColumnValueMap.set(dbIds[i], columnValue);
                 }
             }
 
-            env = env || 'AutodeskProduction2';
-
-            // API depends on Env: SVF2 -> streamingV2, SVF -> derivativeV2
-            const api = env.includes('Production2') ? 'streamingV2' : 'derivativeV2';
-
-            await initializeViewerRuntime({
-                env: env,
-                api: api,
-                region: region,
-                getAccessToken: (callback) => this.getAccessToken(callback), // Wrap to maintain context
-                // @ts-ignore
-                disabledExtensions: { 'Autodesk.Viewing.MixpanelExtension': true }
-            });
-            this.container.innerText = '';
-            this.viewer = new Autodesk.Viewing.GuiViewer3D(this.container);
-            this.viewer.start();
-            this.viewer.loadExtension('Autodesk.VisualClusters');
-            this.viewer.addEventListener(Autodesk.Viewing.OBJECT_TREE_CREATED_EVENT, this.onPropertiesLoaded);
-            this.viewer.addEventListener(Autodesk.Viewing.SELECTION_CHANGED_EVENT, this.onSelectionChanged);
-            if (this.currentUrn) {
-                this.updateModel();
+            console.log(`Visual: buildReverseMapping - Built reverse mapping for ${this.dbIdToColumnValueMap.size} dbIds`);
+            if (this.dbIdToColumnValueMap.size > 0) {
+                const sampleEntries = Array.from(this.dbIdToColumnValueMap.entries()).slice(0, 5);
+                console.log(`Visual: buildReverseMapping - Sample mappings:`, sampleEntries);
             }
-        } catch (err) {
-            this.showNotification('Could not initialize viewer runtime. Please see console for more details.');
-            console.error(err);
+        } catch (e) {
+            console.error("Visual: Error building reverse mapping", e);
         }
     }
 
-    private async fetchToken(urn?: string): Promise<any> {
+    private async fetchToken(urn: string): Promise<any> {
+        if (!this.accessTokenEndpoint) {
+            return null;
+        }
         try {
-            let url = this.accessTokenEndpoint;
-            if (urn) {
-                // Append URN to query params
-                const separator = url.includes('?') ? '&' : '?';
-                url += `${separator}urn=${encodeURIComponent(urn)}`;
-            }
-            const response = await fetch(url);
-            if (!response.ok) return null;
+            const response = await fetch(this.accessTokenEndpoint);
+            if (!response.ok) throw new Error(response.statusText);
             return await response.json();
-        } catch {
+        } catch (e) {
+            console.error("Token fetch error", e);
             return null;
         }
     }
 
-
-
-    /**
-     * Retrieves a new access token for the viewer.
-     * @param callback Callback function to call with new access token.
-     */
-    private async getAccessToken(callback: (accessToken: string, expiresIn: number) => void): Promise<void> {
-        try {
-            const response = await fetch(this.accessTokenEndpoint);
-            if (!response.ok) {
-                throw new Error(await response.text());
+    private async syncSelectionState(isolate: boolean, idsToIsolate: string[]) {
+        // Verify viewer and model are ready
+        if (!this.viewer || !this.model || !this.idMapping) {
+            console.log(`Visual: syncSelectionState - Viewer/model not ready, storing pending selection for ${idsToIsolate.length} IDs`);
+            if (isolate && idsToIsolate.length > 0) {
+                this.pendingSelection = idsToIsolate;
             }
-            const share = await response.json();
-            if (!share.access_token) {
-                throw new Error('Token response is missing access_token');
-            }
-            callback(share.access_token, share.expires_in);
-        } catch (err) {
-            this.showNotification(`Token Error: ${err.message}`);
-            console.error(err);
-        }
-    }
-
-    /**
-     * Ensures that the correct model is loaded into the viewer.
-     */
-    private async updateModel(): Promise<void> {
-        if (!this.viewer) {
             return;
         }
 
-        if (this.model && this.model.getData().urn !== this.currentUrn) {
-            this.viewer.unloadModel(this.model);
-            this.model = null;
-            this.idMapping = null;
+        // Apply any pending selection if viewer is now ready
+        if (this.pendingSelection && this.pendingSelection.length > 0) {
+            console.log(`Visual: syncSelectionState - Applying pending selection for ${this.pendingSelection.length} IDs`);
+            const pendingIds = this.pendingSelection;
+            this.pendingSelection = null;
+            await this.syncSelectionState(true, pendingIds);
+            return;
         }
 
-        try {
-            if (this.currentUrn) {
-                console.log('Visual: Raw URN:', this.currentUrn);
+        // PATH 1: Isolate and highlight specific elements
+        if (isolate && idsToIsolate.length > 0) {
+            try {
+                console.log(`Visual: syncSelectionState - Attempting to isolate and highlight ${idsToIsolate.length} IDs`);
+                console.log(`Visual: syncSelectionState - Input IDs (first 10):`, idsToIsolate.slice(0, 10));
+                console.log(`Visual: syncSelectionState - Input IDs (last 10):`, idsToIsolate.slice(-10));
+                console.log(`Visual: syncSelectionState - All input IDs:`, idsToIsolate);
 
-                // Sanitize URN: remove whitespace
-                let safeUrn = this.currentUrn.trim();
+                // Use smart mapping that validates IDs exist in model
+                // These IDs come from Power BI column and should be dbId values as strings
+                const validDbIds = await this.idMapping.smartMapToDbIds(idsToIsolate);
+                
+                console.log(`Visual: syncSelectionState - Mapping result: ${validDbIds.length} valid DbIds from ${idsToIsolate.length} input IDs`);
+                
+                // CRITICAL: Build a proper mapping from column values to dbIds
+                // Since smartMapToDbIds may not preserve order or may skip invalid IDs,
+                // we need to map each column value to its corresponding dbId
+                const columnValueToDbIdMap = new Map<string, number>();
+                for (let i = 0; i < idsToIsolate.length; i++) {
+                    const columnValue = idsToIsolate[i];
+                    // Try to find the corresponding dbId
+                    // Since we're using direct dbId mapping, the column value should be the dbId as string
+                    const parsedDbId = parseInt(columnValue, 10);
+                    if (!isNaN(parsedDbId) && validDbIds.includes(parsedDbId)) {
+                        columnValueToDbIdMap.set(columnValue, parsedDbId);
+                        // Also update reverse mapping
+                        this.dbIdToColumnValueMap.set(parsedDbId, columnValue);
+                    }
+                }
+                
+                console.log(`Visual: syncSelectionState - Built column value to dbId mapping: ${columnValueToDbIdMap.size} entries`);
 
-                // If it starts with 'urn:', strip it for processing
-                if (safeUrn.toLowerCase().startsWith('urn:')) {
-                    safeUrn = safeUrn.substring(4);
+                console.log(`Visual: syncSelectionState - Mapped ${idsToIsolate.length} IDs to ${validDbIds.length} valid DbIds`);
+
+                // DEBUG: Log actual DbIds to see what we're trying to isolate
+                if (validDbIds.length > 0) {
+                    console.log(`Visual: syncSelectionState - Mapped DbIds (first 10):`, validDbIds.slice(0, 10));
+                    console.log(`Visual: syncSelectionState - Mapped DbIds (last 10):`, validDbIds.slice(-10));
                 }
 
-                // Check if it needs encoding (contains non-base64 characters like ':' or '.')
-                // OR if it contains standard base64 characters that need replacing (+ or /)
-                if (/[^A-Za-z0-9\-_]/.test(safeUrn)) {
-                    // It contains characters NOT allowed in URL-safe Base64.
-                    // Check if it's plain text (has :)
-                    if (safeUrn.includes(':')) {
-                        console.log('Visual: Detected plain text URN, encoding...');
-                        let urnToEncode = this.currentUrn.trim();
-                        if (!urnToEncode.toLowerCase().startsWith('urn:')) {
-                            urnToEncode = 'urn:' + urnToEncode;
+                if (validDbIds.length === 0) {
+                    console.warn(`Visual: syncSelectionState - None of the ${idsToIsolate.length} IDs could be mapped to valid DbIds in the model.`);
+                    console.warn(`Visual: syncSelectionState - Sample IDs attempted:`, idsToIsolate.slice(0, 20));
+                    // Show all if no valid IDs
+                    this.viewer.clearSelection();
+                    this.viewer.clearThemingColors(this.model);
+                    showAll(this.viewer, this.model);
+                    return;
+                }
+
+                // Log mapping efficiency
+                if (validDbIds.length < idsToIsolate.length) {
+                    console.warn(`Visual: syncSelectionState - Only ${validDbIds.length} of ${idsToIsolate.length} IDs were valid.`);
+                }
+
+                // Verify the DbIds are actually visible/selectable in the model
+                const tree = this.model.getInstanceTree();
+                const verifiedDbIds: number[] = [];
+                const containerNodes: number[] = []; // Nodes with children (not leaf geometry)
+
+                for (const dbid of validDbIds) {
+                    try {
+                        const nodeType = tree.getNodeType(dbid);
+                        if (nodeType != null) {
+                            verifiedDbIds.push(dbid);
+
+                            // Check if this is a container node (has children)
+                            const childCount = tree.getChildCount(dbid);
+                            if (childCount > 0) {
+                                containerNodes.push(dbid);
+                            }
                         }
-                        try {
-                            safeUrn = btoa(urnToEncode).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-                        } catch (e) {
-                            console.error('Failed to encode URN:', e);
-                        }
-                    } else {
-                        // It might be standard Base64 (with + or / or =), fix it to URL-safe
-                        console.log('Visual: Detected standard Base64 or invalid chars, fixing...');
-                        safeUrn = safeUrn.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+                    } catch (e) {
+                        // Node doesn't exist, skip it
                     }
                 }
 
-                console.log('Visual: Final Safe URN:', safeUrn);
-                this.model = await loadModel(this.viewer, safeUrn, this.currentGuid);
-            }
-        } catch (err) {
-            let decodedUrn = '';
-            try {
-                decodedUrn = atob(this.currentUrn.replace(/-/g, '+').replace(/_/g, '/'));
-            } catch (e) {
-                decodedUrn = 'Invalid Base64';
-            }
-            let msg = `Could not load model. URN: ${this.currentUrn.substring(0, 10)}... Decoded: ${decodedUrn.substring(0, 50)}... `;
-            if (err && typeof err === 'object') {
-                if ('code' in err) msg += ` Code: ${err.code}`;
-                if ('message' in err) msg += ` Message: ${err.message}`;
-            } else {
-                msg += ` Error: ${String(err)}`;
-            }
-            this.showNotification(msg);
-            console.error(err);
-        }
-    }
+                console.log(`Visual: syncSelectionState - Final verified DbIds: ${verifiedDbIds.length}`);
 
-    private sampleModelId: string = '';
-
-    private async onPropertiesLoaded() {
-        this.idMapping = new IdMapping(this.model);
-
-        // DEBUG: Log sample valid IDs from the model to help user fix data mismatch
-        try {
-            // @ts-ignore
-            this.model.getExternalIdMapping((mapping) => {
-                const keys = Object.keys(mapping);
-                if (keys.length > 0) {
-                    this.sampleModelId = keys[0];
+                // CRITICAL DEBUG: Check if we're trying to isolate container nodes
+                if (containerNodes.length > 0) {
+                    console.warn(`Visual: syncSelectionState - WARNING: ${containerNodes.length} of ${verifiedDbIds.length} DbIds are container nodes (have children)`);
+                    console.warn(`Visual: syncSelectionState - Container nodes (first 5):`, containerNodes.slice(0, 5));
+                    console.warn(`Visual: syncSelectionState - Expanding container nodes to include all children for visibility`);
                 }
-                console.log(`Visual: Model contains ${keys.length} elements.`);
-                console.log('Visual: Sample VALID Model External IDs (Copy these to your data):', JSON.stringify(keys.slice(0, 5)));
-            });
-        } catch (e) {
-            console.error('Visual: Could not log model IDs', e);
-        }
 
-        await this.syncSelectionState(false);
-    }
+                // CRITICAL FIX: Expand container nodes to include all their children
+                // This ensures that leaf nodes (with actual geometry) are included in isolation
+                const expandedDbIds = new Set<number>();
 
+                for (const dbid of verifiedDbIds) {
+                    // Add the node itself
+                    expandedDbIds.add(dbid);
 
-    private async syncSelectionState(isFetching: boolean) {
-        if (!this.viewer || !this.model) return;
+                    // If it has children, recursively add all descendants
+                    const childCount = tree.getChildCount(dbid);
+                    if (childCount > 0) {
+                        // Recursively get all children
+                        tree.enumNodeChildren(dbid, (childId) => {
+                            expandedDbIds.add(childId);
+                        }, true); // true = recursive
+                    }
+                }
 
-        // If we are fetching more data, show loading status
-        if (isFetching) {
-            this.statusDiv.innerText = `Loading... (${this.allRows.length} rows)`;
-            this.statusDiv.style.color = 'yellow';
-            return;
-        }
+                const finalDbIds = Array.from(expandedDbIds);
 
-        const rowCount = this.allRows.length;
-        if (rowCount === 0) {
-            this.statusDiv.innerText = 'No Data Rows';
-            this.statusDiv.style.color = 'white';
-            // Show full model when no data
-            this.viewer.isolate(undefined, this.model);
-            this.viewer.fitToView(undefined, this.model);
-            return;
-        }
+                console.log(`Visual: syncSelectionState - Expanded ${verifiedDbIds.length} DbIds to ${finalDbIds.length} DbIds (including children)`);
+                if (finalDbIds.length > verifiedDbIds.length) {
+                    console.log(`Visual: syncSelectionState - Added ${finalDbIds.length - verifiedDbIds.length} child nodes for visibility`);
+                }
 
-        // Check if we have any valid IDs in our map
-        if (this.elementDataMap.size === 0) {
-            this.statusDiv.innerText = 'No IDs mapped';
-            this.statusDiv.style.color = 'orange';
-            // Show full model when no IDs mapped
-            this.viewer.isolate(undefined, this.model);
-            this.viewer.fitToView(undefined, this.model);
-            return;
-        }
+                if (finalDbIds.length > 0) {
+                    // Comportamiento EXACTO del "Navegador de modelo":
+                    //  1. AISLAR los elementos (ocultar el resto del modelo) - CRÍTICO
+                    //  2. Seleccionar los nodos
+                    //  3. Aplicar color de resaltado (verde neón)
+                    //  4. Enfocar la cámara
 
-        // IMPORTANT: By default, we DON'T isolate anything.
-        // We only isolate if there's an explicit selection/filter from Power BI.
-        // For now, since we're just loading data (not filtering), show the full model.
+                    console.log(`Visual: syncSelectionState - Applying model-browser-like isolation and selection for ${finalDbIds.length} DbIds`);
 
-        // Show full model and update status
-        this.viewer.isolate(undefined, this.model);
-        this.viewer.fitToView(undefined, this.model);
-        this.statusDiv.innerText = `Rows: ${rowCount} | Model Ready`;
-        this.statusDiv.style.color = 'lightgreen';
+                    // Step 1: Clear any existing selection and theming colors
+                    console.log(`Visual: syncSelectionState - Clearing previous selection and theming`);
+                    
+                    // IMPORTANTE: Primero limpiar colores, luego selección
+                    this.viewer.clearThemingColors(this.model);
+                    this.viewer.clearSelection();
 
-        console.log(`Visual: Model loaded with ${rowCount} rows. Showing full model.`);
-    }
+                    // Step 2: Programmatic selection (como si hicieras click en el Navegador de modelo)
+                    // Usamos el flag isProgrammaticSelection para que SELECTION_CHANGED_EVENT
+                    // no dispare filtros de salida en handleDbIds.
+                    this.isProgrammaticSelection = true; // ACTIVAR FLAG ANTES DE AISLAR/SELECCIONAR
 
-    private async onSelectionChanged() {
-        if (this.isProgrammaticSelection) return;
+                    // Step 3: ISOLATION (Model Explorer behavior)
+                    // We use expanded IDs to ensure geometry is visible
+                    console.log(`Visual: syncSelectionState - Isolating ${finalDbIds.length} elements (hiding all others)`);
+                    isolateDbIds(this.viewer, this.model, finalDbIds);
 
-        const selectedDbids = this.viewer.getSelection();
-        if (selectedDbids.length === 0) {
-            this.selectionManager.clear();
-            this.statusDiv.innerText = `Rows: ${this.allRows.length} | Ready`;
-            this.statusDiv.style.color = 'white';
-            return;
-        }
+                    // Step 4: Selecting elements
+                    console.log(`Visual: syncSelectionState - Selecting ${finalDbIds.length} elements`);
+                    this.viewer.select(finalDbIds, this.model);
 
-        let keysToLookup: string[] = [];
-        keysToLookup.push(...selectedDbids.map(id => id.toString()));
+                    // Step 5: Highlight nodes with neon green color
+                    const neonGreen = new THREE.Vector4(0.224, 1.0, 0.078, 1.0); // #39FF14 in RGB normalized
+                    console.log(`Visual: syncSelectionState - Theming ${finalDbIds.length} nodes with neon green`);
+                    
+                    // Aplicar color a cada nodo (expandido)
+                    finalDbIds.forEach(dbid => {
+                        this.viewer.setThemingColor(dbid, neonGreen, this.model);
+                    });
 
-        try {
-            const externalIds = await this.idMapping.getExternalIds(selectedDbids);
-            keysToLookup.push(...externalIds);
+                    // Forzar un repintado del visor tras aislamiento, selección y theming
+                    if ((this.viewer as any).impl?.invalidate) {
+                        console.log(`Visual: syncSelectionState - Forcing viewer.invalidate() after isolation/selection/theming`);
+                        (this.viewer as any).impl.invalidate(true, true, true);
+                    }
 
-            const firstExt = externalIds.length > 0 ? externalIds[0] : 'None';
-            const firstInt = selectedDbids[0];
-            this.statusDiv.innerText = `Selected: ${firstInt} (Int) / ${firstExt} (Ext)`;
-            this.statusDiv.style.color = 'cyan';
-        } catch (e) {
-            console.error('Visual: Error getting external IDs', e);
-        }
+                    // Step 6: Fit camera to view the isolated elements
+                    console.log(`Visual: syncSelectionState - Fitting camera to ${finalDbIds.length} isolated elements`);
+                    fitToView(this.viewer, this.model, finalDbIds);
 
-        const selectionIds: powerbi.extensibility.ISelectionId[] = [];
+                    // Quitar el flag programático DESPUÉS de todas las operaciones
+                    // Usamos un pequeño timeout para asegurar que los eventos se hayan procesado
+                    setTimeout(() => {
+                        this.isProgrammaticSelection = false;
+                    }, 100);
 
-        // Iterate map to find matching keys
-        // Since we changed the map value structure, we need to check the ID inside the object
-        // Wait, the MAP KEY is the SelectionId Key. The VALUE is { id, color, selectionId }.
-        // We need to find the map entry where value.id matches one of our keysToLookup.
-        // This is inefficient (O(N)). We might need a reverse map if performance is bad.
-        // For now, iteration is fine for < 30k rows.
-
-        this.elementDataMap.forEach((data, key) => {
-            if (keysToLookup.includes(data.id)) {
-                selectionIds.push(data.selectionId);
+                    console.log(`Visual: syncSelectionState - Successfully isolated, selected and highlighted ${finalDbIds.length} elements (model-browser-like behavior)`);
+                } else {
+                    console.error(`Visual: syncSelectionState - No valid DbIds after verification, showing all`);
+                    this.viewer.clearSelection();
+                    this.viewer.clearThemingColors(this.model);
+                    showAll(this.viewer, this.model);
+                }
+            } catch (e) {
+                console.error("Visual: Error syncing selection", e);
+                this.viewer.clearSelection();
+                this.viewer.clearThemingColors(this.model);
+                showAll(this.viewer, this.model);
             }
-        });
-
-        this.selectionManager.select(selectionIds);
+        }
+        // PATH 2: Show all elements (no isolation)
+        else {
+            console.log("Visual: syncSelectionState - Showing all elements (no isolation)");
+            this.viewer.clearSelection();
+            this.viewer.clearThemingColors(this.model);
+            showAll(this.viewer, this.model);
+        }
     }
 
-    /**
-     * Applies colors from the Power BI data to the Viewer elements.
-     */
     private async syncColors() {
-        if (!this.viewer) return;
+        if (!this.viewer || !this.model || !this.elementDataMap || !this.idMapping) return;
 
-        this.viewer.clearThemingColors(this.viewer.model);
-        const colorGroups: Map<string, number[]> = new Map();
+        // Collect colors
+        const colorMap: { [color: string]: string[] } = {}; // color -> ids[]
 
-        // Prepare a list of IDs that need mapping
-        const idsToMap: string[] = [];
-
-        for (const [key, data] of this.elementDataMap) {
-            if (!data.color) continue;
-
-            // If it's already a number, great. If not, we might need to map it.
-            const parsedId = parseInt(data.id);
-            if (isNaN(parsedId)) {
-                idsToMap.push(data.id);
-            }
-        }
-
-        // Batch map external IDs if needed
-        let mappedIdsMap: Map<string, number> = new Map();
-        if (idsToMap.length > 0 && this.idMapping) {
-            try {
-                const dbIds = await this.idMapping.getDbids(idsToMap);
-                for (let i = 0; i < idsToMap.length; i++) {
-                    if (dbIds[i]) {
-                        mappedIdsMap.set(idsToMap[i], dbIds[i]);
-                    }
-                }
-            } catch (e) {
-                console.error("Visual: Error mapping IDs for colors", e);
-            }
-        }
-
-        // Now assign colors
-        for (const [key, data] of this.elementDataMap) {
-            if (!data.color) continue;
-
-            let dbId: number | null = null;
-            const parsedId = parseInt(data.id);
-
-            if (!isNaN(parsedId)) {
-                dbId = parsedId;
-            } else {
-                // Try to get from our batch mapping
-                const mapped = mappedIdsMap.get(data.id);
-                if (mapped) dbId = mapped;
-            }
-
-            if (dbId !== null) {
-                if (!colorGroups.has(data.color)) {
-                    colorGroups.set(data.color, []);
-                }
-                colorGroups.get(data.color)!.push(dbId);
-            }
-        }
-
-        colorGroups.forEach((dbIds, colorHex) => {
-            const vector = this.hexToVector4(colorHex);
-            if (vector) {
-                dbIds.forEach(dbId => {
-                    this.viewer.setThemingColor(dbId, vector, this.viewer.model);
-                });
+        this.elementDataMap.forEach(value => {
+            if (value.color) {
+                if (!colorMap[value.color]) colorMap[value.color] = [];
+                colorMap[value.color].push(value.id);
             }
         });
-    }
 
-    private hexToVector4(hex: string): THREE.Vector4 | null {
-        if (!hex) return null;
-        hex = hex.replace('#', '');
-        if (hex.length === 6) {
-            const r = parseInt(hex.substring(0, 2), 16) / 255;
-            const g = parseInt(hex.substring(2, 4), 16) / 255;
-            const b = parseInt(hex.substring(4, 6), 16) / 255;
-            return new THREE.Vector4(r, g, b, 1);
+        // Apply colors
+        this.viewer.clearThemingColors(this.model);
+
+        for (const colorHex in colorMap) {
+            const ids = colorMap[colorHex];
+            try {
+                // Use smart mapping to get valid DbIds
+                const validDbIds = await this.idMapping.smartMapToDbIds(ids);
+
+                if (validDbIds.length > 0) {
+                    const vec = this.hexToVector4(colorHex);
+                    validDbIds.forEach(dbid => {
+                        this.viewer.setThemingColor(dbid, vec, this.model);
+                    });
+                }
+            } catch (e) {
+                console.error("Visual: Error applying colors", e);
+            }
         }
-        return null;
     }
 
-    private collectDesignUrns(dataView: DataView, urnIndex: number): string[] {
-        let urns = new Set(dataView.table.rows.map(row => row[urnIndex].valueOf() as string));
-        return Array.from(urns);
-    }
+    /**
+     * Sync colors only for filtered elements (preserves filter highlighting)
+     */
+    private async syncColorsForFilteredElements(filteredIds: string[]) {
+        if (!this.viewer || !this.model || !this.elementDataMap || !this.idMapping) return;
 
-    private logVisualUpdateOptions(options: VisualUpdateOptions) {
-        const EditMode = {
-            [powerbi.EditMode.Advanced]: 'Advanced',
-            [powerbi.EditMode.Default]: 'Default',
-        };
-        const VisualDataChangeOperationKind = {
-            [powerbi.VisualDataChangeOperationKind.Append]: 'Append',
-            [powerbi.VisualDataChangeOperationKind.Create]: 'Create',
-            [powerbi.VisualDataChangeOperationKind.Segment]: 'Segment',
-        };
-        const VisualUpdateType = {
-            [powerbi.VisualUpdateType.All]: 'All',
-            [powerbi.VisualUpdateType.Data]: 'Data',
-            [powerbi.VisualUpdateType.Resize]: 'Resize',
-            [powerbi.VisualUpdateType.ResizeEnd]: 'ResizeEnd',
-            [powerbi.VisualUpdateType.Style]: 'Style',
-            [powerbi.VisualUpdateType.ViewMode]: 'ViewMode',
-        };
-        const ViewMode = {
-            [powerbi.ViewMode.Edit]: 'Edit',
-            [powerbi.ViewMode.InFocusEdit]: 'InFocusEdit',
-            [powerbi.ViewMode.View]: 'View',
-        };
-        console.debug('editMode', EditMode[options.editMode]);
-        console.debug('isInFocus', options.isInFocus);
-        console.debug('jsonFilters', options.jsonFilters);
-        console.debug('operationKind', VisualDataChangeOperationKind[options.operationKind]);
-        console.debug('type', VisualUpdateType[options.type]);
-        console.debug('viewMode', ViewMode[options.viewMode]);
-        console.debug('viewport', options.viewport);
-        console.debug('Data views:');
-        for (const dataView of options.dataViews) {
-            console.debug(dataView);
+        // Create a set of filtered IDs for quick lookup
+        const filteredSet = new Set(filteredIds);
+
+        // Collect colors only for filtered elements
+        const colorMap: { [color: string]: string[] } = {}; // color -> ids[]
+
+        this.elementDataMap.forEach(value => {
+            // Only process colors for filtered elements
+            if (value.color && filteredSet.has(value.id)) {
+                if (!colorMap[value.color]) colorMap[value.color] = [];
+                colorMap[value.color].push(value.id);
+            }
+        });
+
+        // Apply colors only to filtered elements (don't clear all theming, preserve filter highlight)
+        for (const colorHex in colorMap) {
+            const ids = colorMap[colorHex];
+            try {
+                // Use smart mapping to get valid DbIds
+                const validDbIds = await this.idMapping.smartMapToDbIds(ids);
+
+                if (validDbIds.length > 0) {
+                    const vec = this.hexToVector4(colorHex);
+                    validDbIds.forEach(dbid => {
+                        // Apply color, but don't clear the neon green filter highlight
+                        // The filter highlight should take precedence
+                        this.viewer.setThemingColor(dbid, vec, this.model);
+                    });
+                }
+            } catch (e) {
+                console.error("Visual: Error applying colors to filtered elements", e);
+            }
         }
+    }
+
+    private hexToVector4(hex: string): THREE.Vector4 {
+        if (hex.startsWith('#')) hex = hex.substring(1);
+        const r = parseInt(hex.substring(0, 2), 16) / 255;
+        const g = parseInt(hex.substring(2, 4), 16) / 255;
+        const b = parseInt(hex.substring(4, 6), 16) / 255;
+        return new THREE.Vector4(r, g, b, 1);
+    }
+
+    public getFormattingModel(): powerbi.visuals.FormattingModel {
+        return this.formattingSettingsService.buildFormattingModel(this.formattingSettings);
     }
 }

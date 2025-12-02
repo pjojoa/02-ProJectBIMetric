@@ -72,6 +72,7 @@
         }
     ],
     "supportsMultiVisualSelection": true,
+    "supportsHighlight": false,
     "suppressDefaultTitle": true,
     "supportsLandingPage": true,
     "supportsEmptyDataView": true

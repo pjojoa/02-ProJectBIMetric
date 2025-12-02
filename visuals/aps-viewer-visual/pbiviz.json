@@ -1,13 +1,13 @@
 {
     "visual": {
-        "name": "aps-viewer-visual",
-        "displayName": "APS Viewer Visual (1.0.0)",
+        "name": "aps_viewer_visual",
+        "displayName": "APS Viewer Visual",
         "guid": "aps_viewer_visual_a4f2990a03324cf79eb44f982719df44",
         "visualClassName": "Visual",
-        "version": "1.0.0.0",
-        "description": "Visual for previewing shared 2D/3D designs from Autodesk Platform Services.",
-        "supportUrl": "https://github.com/autodesk-platform-services/aps-powerbi-tools",
-        "gitHubUrl": "https://github.com/autodesk-platform-services/aps-powerbi-tools"
+        "version": "1.0.1.0",
+        "description": "Autodesk Platform Services Viewer for Power BI",
+        "supportUrl": "https://github.com/pjojoa/02-ProJectBIMetric/issues",
+        "gitHubUrl": "https://github.com/pjojoa/02-ProJectBIMetric"
     },
     "apiVersion": "5.4.0",
     "author": {

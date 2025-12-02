@@ -41,6 +41,16 @@ import ISelectionId = powerbi.visuals.ISelectionId;
 import DataView = powerbi.DataView;
 import DataViewTableRow = powerbi.DataViewTableRow;
 
+<<<<<<< HEAD
+=======
+import { VisualSettingsModel } from './settings';
+import { initializeViewerRuntime, loadModel, IdMapping, isolateDbIds, fitToView, showAll } from './viewer.utils';
+import * as models from 'powerbi-models';
+
+/**
+ * Custom visual wrapper for the Autodesk Platform Services Viewer.
+ */
+>>>>>>> 637fefe79f416cc605a6e8b3d4f2c4a2a103b2da
 export class Visual implements IVisual {
     // Visual state
     private host: IVisualHost;
@@ -74,6 +84,18 @@ export class Visual implements IVisual {
     private externalIds: string[] = []; // For mapping
     private dbIdToColumnValueMap: Map<number, string> = new Map(); // Map dbId -> column value (for filtering)
 
+<<<<<<< HEAD
+=======
+    // Interactivity state for bidirectional filtering
+    private allDbIds: number[] | null = null;
+    private hasClearedFilters: boolean = false;
+    private isDbIdSelectionActive: boolean = false;
+
+    /**
+     * Initializes the viewer visual.
+     * @param options Additional visual initialization options.
+     */
+>>>>>>> 637fefe79f416cc605a6e8b3d4f2c4a2a103b2da
     constructor(options: VisualConstructorOptions) {
         this.host = options.host;
         this.formattingSettingsService = new FormattingSettingsService();
@@ -262,6 +284,7 @@ export class Visual implements IVisual {
             // TODO: Implement view switching logic if needed
         }
 
+<<<<<<< HEAD
         // 8. INCOMING FILTER LOGIC (Power BI -> Viewer)
         // Simplified logic with three clear states:
         // 1. External filter active: isDataFilterApplied === true AND !isDbIdSelectionActive
@@ -373,6 +396,16 @@ export class Visual implements IVisual {
             this.isDbIdSelectionActive = false;
 
             // Restore original colors from data
+=======
+        // 6.5. Handle incoming filters from other visuals (bidirectional interactivity)
+        if (this.viewer && this.isViewerReady && this.idMapping && !isFetching) {
+            await this.handleIncomingFilters(dataView);
+        }
+
+        // 7. Sync Selection & Colors
+        if (this.viewer && this.isViewerReady && this.idMapping) {
+            await this.syncSelectionState(isFetching);
+>>>>>>> 637fefe79f416cc605a6e8b3d4f2c4a2a103b2da
             await this.syncColors();
 
             // Reset flag after operation
@@ -702,6 +735,7 @@ export class Visual implements IVisual {
                     }
                 }
 
+<<<<<<< HEAD
                 console.log(`Visual: syncSelectionState - Final verified DbIds: ${verifiedDbIds.length}`);
 
                 // CRITICAL DEBUG: Check if we're trying to isolate container nodes
@@ -709,6 +743,44 @@ export class Visual implements IVisual {
                     console.warn(`Visual: syncSelectionState - WARNING: ${containerNodes.length} of ${verifiedDbIds.length} DbIds are container nodes (have children)`);
                     console.warn(`Visual: syncSelectionState - Container nodes (first 5):`, containerNodes.slice(0, 5));
                     console.warn(`Visual: syncSelectionState - Expanding container nodes to include all children for visibility`);
+=======
+                console.log('Visual: Final Safe URN:', safeUrn);
+                this.model = await loadModel(this.viewer, safeUrn, this.currentGuid);
+                this.isViewerReady = true;
+            }
+        } catch (err) {
+            let decodedUrn = '';
+            try {
+                decodedUrn = atob(this.currentUrn.replace(/-/g, '+').replace(/_/g, '/'));
+            } catch (e) {
+                decodedUrn = 'Invalid Base64';
+            }
+            let msg = `Could not load model. URN: ${this.currentUrn.substring(0, 10)}... Decoded: ${decodedUrn.substring(0, 50)}... `;
+            if (err && typeof err === 'object') {
+                if ('code' in err) msg += ` Code: ${err.code}`;
+                if ('message' in err) msg += ` Message: ${err.message}`;
+            } else {
+                msg += ` Error: ${String(err)}`;
+            }
+            this.showNotification(msg);
+            console.error(err);
+        }
+    }
+
+    private sampleModelId: string = '';
+
+    private async onPropertiesLoaded() {
+        this.idMapping = new IdMapping(this.model);
+        this.isViewerReady = true;
+
+        // DEBUG: Log sample valid IDs from the model to help user fix data mismatch
+        try {
+            // @ts-ignore
+            this.model.getExternalIdMapping((mapping) => {
+                const keys = Object.keys(mapping);
+                if (keys.length > 0) {
+                    this.sampleModelId = keys[0];
+>>>>>>> 637fefe79f416cc605a6e8b3d4f2c4a2a103b2da
                 }
 
                 // CRITICAL FIX: Expand container nodes to include all their children
@@ -731,6 +803,7 @@ export class Visual implements IVisual {
 
                 const finalDbIds = Array.from(expandedDbIds);
 
+<<<<<<< HEAD
                 console.log(`Visual: syncSelectionState - Expanded ${verifiedDbIds.length} DbIds to ${finalDbIds.length} DbIds (including children)`);
                 if (finalDbIds.length > verifiedDbIds.length) {
                     console.log(`Visual: syncSelectionState - Added ${finalDbIds.length - verifiedDbIds.length} child nodes for visibility`);
@@ -756,15 +829,336 @@ export class Visual implements IVisual {
                     // Usamos el flag isProgrammaticSelection para que SELECTION_CHANGED_EVENT
                     // no dispare filtros de salida en handleDbIds.
                     this.isProgrammaticSelection = true; // ACTIVAR FLAG ANTES DE AISLAR/SELECCIONAR
+=======
+        const rowCount = this.allRows.length;
+        if (rowCount === 0) {
+            this.statusDiv.innerText = 'No Data Rows';
+            this.statusDiv.style.color = 'white';
+            // Show full model when no data
+            showAll(this.viewer, this.model);
+            return;
+        }
+
+        // Check if we have any valid IDs in our map
+        if (this.elementDataMap.size === 0) {
+            this.statusDiv.innerText = 'No IDs mapped';
+            this.statusDiv.style.color = 'orange';
+            // Show full model when no IDs mapped
+            showAll(this.viewer, this.model);
+            return;
+        }
+
+        // NOTE: Isolation is now handled by handleIncomingFilters().
+        // This method only updates the status bar.
+        // Only show full model if we haven't applied any isolation yet.
+        if (!this.allDbIds || this.allDbIds.length === 0) {
+            // Initial load: show full model
+            showAll(this.viewer, this.model);
+        }
+        
+        this.statusDiv.innerText = `Rows: ${rowCount} | Model Ready`;
+        this.statusDiv.style.color = 'lightgreen';
+
+        console.log(`Visual: Model loaded with ${rowCount} rows.`);
+    }
+
+    /**
+     * Finds the index of a category by its role name in the dataView.
+     * @param dataView The data view to search in.
+     * @param roleName The role name to find.
+     * @returns The index of the category, or -1 if not found.
+     */
+    private findCategoryIndexByRole(dataView: DataView, roleName: string): number {
+        if (!dataView?.categorical?.categories) return -1;
+        
+        const categories = dataView.categorical.categories;
+        for (let i = 0; i < categories.length; i++) {
+            const category = categories[i];
+            if (category.source?.roles && category.source.roles[roleName]) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * Handles incoming filters from other visuals and isolates/focuses elements in the viewer.
+     * @param dataView The current data view.
+     */
+    private async handleIncomingFilters(dataView: DataView): Promise<void> {
+        if (!this.viewer || !this.model || !this.idMapping) return;
+
+        // Skip if this filter change came from our own selection
+        if (this.isDbIdSelectionActive) {
+            this.isDbIdSelectionActive = false;
+            return;
+        }
+
+        // Check if we have categorical data
+        const cat = dataView?.categorical?.categories;
+        if (!cat || cat.length === 0) {
+            // Fallback to table data if categorical is not available
+            if (dataView?.table?.rows) {
+                const dbidsIndex = dataView.table.columns.findIndex(c => c.roles["dbids"]);
+                if (dbidsIndex !== -1) {
+                    const currentDbIds = dataView.table.rows
+                        .map(row => {
+                            const value = row[dbidsIndex];
+                            const parsed = typeof value === 'string' ? parseInt(value) : Number(value);
+                            return isNaN(parsed) ? null : parsed;
+                        })
+                        .filter((id): id is number => id !== null);
+
+                    await this.applyIsolationToViewer(currentDbIds, dataView);
+                }
+            }
+            return;
+        }
+
+        // Find the dbids category index
+        const dbidsIndex = this.findCategoryIndexByRole(dataView, "dbids");
+        if (dbidsIndex === -1) {
+            return;
+        }
+
+        // Extract current visible dbIds from categorical data
+        const category = cat[dbidsIndex];
+        if (!category || !category.values) {
+            return;
+        }
+
+        const currentDbIds = category.values
+            .map(v => {
+                const parsed = typeof v === 'string' ? parseInt(v) : Number(v);
+                return isNaN(parsed) ? null : parsed;
+            })
+            .filter((id): id is number => id !== null);
+
+        // Initialize allDbIds on first update (when no filters are applied)
+        if (this.allDbIds === null) {
+            this.allDbIds = currentDbIds.slice();
+        }
+
+        // Check if a filter is applied
+        const filterApplied = dataView.metadata?.isDataFilterApplied === true;
+        const hasSegment = !!dataView.metadata?.segment;
+
+        // Apply isolation based on filter state
+        await this.applyIsolationToViewer(currentDbIds, dataView, filterApplied, hasSegment);
+    }
+
+    /**
+     * Applies isolation and fitToView to the viewer based on filtered dbIds.
+     * @param currentDbIds The current visible dbIds after filtering.
+     * @param dataView The data view.
+     * @param filterApplied Whether a filter is currently applied.
+     * @param segment Whether we're in a segment (pagination).
+     */
+    private async applyIsolationToViewer(
+        currentDbIds: number[],
+        dataView: DataView,
+        filterApplied?: boolean,
+        segment?: boolean
+    ): Promise<void> {
+        if (!this.viewer || !this.model) return;
+
+        // If we're fetching more data (segment), don't apply isolation yet
+        if (segment) {
+            return;
+        }
+
+        // Check if filter is applied (default to true if currentDbIds is smaller than allDbIds)
+        const isFiltered = filterApplied !== undefined 
+            ? filterApplied 
+            : (this.allDbIds && currentDbIds.length < this.allDbIds.length);
+
+        if (isFiltered && currentDbIds.length > 0) {
+            // Map external IDs to dbIds if needed
+            let dbIdsToIsolate: number[] = [];
+            
+            // Check if currentDbIds are external IDs (strings) or dbIds (numbers)
+            const firstId = currentDbIds[0];
+            const isExternalId = typeof firstId === 'string' || 
+                (this.externalIds.length > 0 && this.externalIds.includes(String(firstId)));
+
+            if (isExternalId && this.idMapping) {
+                try {
+                    dbIdsToIsolate = await this.idMapping.getDbids(currentDbIds.map(String));
+                    dbIdsToIsolate = dbIdsToIsolate.filter(id => id != null && !isNaN(id));
+                } catch (e) {
+                    console.error('Visual: Error mapping external IDs to dbIds for isolation', e);
+                    // Fallback: assume they are already dbIds
+                    dbIdsToIsolate = currentDbIds.filter(id => !isNaN(Number(id))).map(Number);
+                }
+            } else {
+                dbIdsToIsolate = currentDbIds.filter(id => !isNaN(Number(id))).map(Number);
+            }
+
+            if (dbIdsToIsolate.length > 0) {
+                console.log(`Visual: Isolating and selecting ${dbIdsToIsolate.length} elements due to filter`);
+                
+                // Set programmatic selection flag to prevent triggering onSelectionChanged
+                this.isProgrammaticSelection = true;
+                
+                // Clear any existing selection first
+                this.viewer.clearSelection();
+                
+                // Isolate and fit to view
+                isolateDbIds(this.viewer, dbIdsToIsolate, this.model);
+                fitToView(this.viewer, dbIdsToIsolate, this.model);
+                
+                // Wait a bit for isolation to complete, then select the elements
+                // This ensures the elements are visible before selection
+                setTimeout(() => {
+                    try {
+                        // Verify elements are isolated before selecting
+                        const isolatedNodes = this.viewer.getIsolatedNodes();
+                        console.log(`Visual: Isolated nodes count: ${isolatedNodes ? isolatedNodes.length : 0}`);
+                        
+                        // Select the elements visually in the viewer
+                        this.viewer.select(dbIdsToIsolate);
+                        
+                        // Verify selection was applied
+                        const selectedNodes = this.viewer.getSelection();
+                        console.log(`Visual: Selected ${selectedNodes.length} elements in viewer (requested ${dbIdsToIsolate.length})`);
+                        
+                        if (selectedNodes.length !== dbIdsToIsolate.length) {
+                            console.warn(`Visual: Selection mismatch - requested ${dbIdsToIsolate.length}, got ${selectedNodes.length}`);
+                        }
+                    } catch (e) {
+                        console.error('Visual: Error selecting elements', e);
+                    }
+                    
+                    // Reset flag after selection completes
+                    setTimeout(() => {
+                        this.isProgrammaticSelection = false;
+                    }, 50);
+                }, 200);
+                
+                this.hasClearedFilters = false;
+            }
+        } else if (!isFiltered && this.hasClearedFilters === false) {
+            // Clear isolation and show all
+            console.log('Visual: Clearing isolation, showing all elements');
+            
+            // Set programmatic selection flag
+            this.isProgrammaticSelection = true;
+            
+            // Clear selection
+            this.viewer.clearSelection();
+            
+            // Show all elements
+            showAll(this.viewer, this.model);
+            
+            // Reset flag after a short delay
+            setTimeout(() => {
+                this.isProgrammaticSelection = false;
+            }, 100);
+            
+            this.hasClearedFilters = true;
+        }
+    }
+
+    /**
+     * Handles dbId selection changes from the viewer and applies filters to other visuals.
+     * @param selectedDbIds Array of selected dbIds from the viewer.
+     */
+    private async handleDbIds(selectedDbIds: number[]): Promise<void> {
+        if (!this.host || !this.currentDataView) return;
+
+        // If no selection, clear filters
+        if (!selectedDbIds || selectedDbIds.length === 0) {
+            this.host.applyJsonFilter(null, "general", "selfFilter", 0);
+            this.host.applyJsonFilter(null, "general", "filter", 0);
+            this.isDbIdSelectionActive = false;
+            return;
+        }
+
+        // Find the dbids category index
+        const dbidsIndex = this.findCategoryIndexByRole(this.currentDataView, "dbids");
+        if (dbidsIndex === -1) {
+            console.warn('Visual: dbids category not found in categorical data');
+            return;
+        }
+
+        const category = this.currentDataView.categorical.categories[dbidsIndex];
+        if (!category || !category.source) {
+            console.warn('Visual: Invalid category structure');
+            return;
+        }
+
+        // Extract table and column from the category source
+        const queryName = category.source.queryName || '';
+        const table = queryName.split('.')[0] || '';
+        const column = category.source.displayName || category.source.queryName || '';
+
+        if (!table || !column) {
+            console.warn('Visual: Could not determine table or column for filter');
+            return;
+        }
+
+        // Build filter target
+        const target: models.IFilterColumnTarget = {
+            table: table,
+            column: column
+        };
+
+        // Map dbIds to external IDs if possible, otherwise use dbIds as strings
+        let filterValues: string[] = [];
+        
+        if (this.idMapping) {
+            try {
+                const externalIds = await this.idMapping.getExternalIds(selectedDbIds);
+                filterValues = externalIds.filter(id => id != null && id !== '');
+                
+                // Fallback to dbIds if external IDs are not available
+                if (filterValues.length === 0) {
+                    filterValues = selectedDbIds.map(String);
+                }
+            } catch (e) {
+                console.error('Visual: Error mapping dbIds to external IDs', e);
+                filterValues = selectedDbIds.map(String);
+            }
+        } else {
+            filterValues = selectedDbIds.map(String);
+        }
+
+        if (filterValues.length > 0) {
+            const filter = new models.BasicFilter(
+                target,
+                "In",
+                filterValues
+            );
+
+            console.log('Visual: Applying JSON filter for selected dbIds:', filter);
+            this.host.applyJsonFilter(filter, "general", "filter", 0);
+            this.isDbIdSelectionActive = true;
+        }
+    }
+>>>>>>> 637fefe79f416cc605a6e8b3d4f2c4a2a103b2da
 
                     // Step 3: ISOLATION (Model Explorer behavior)
                     // We use expanded IDs to ensure geometry is visible
                     console.log(`Visual: syncSelectionState - Isolating ${finalDbIds.length} elements (hiding all others)`);
                     isolateDbIds(this.viewer, this.model, finalDbIds);
 
+<<<<<<< HEAD
                     // Step 4: Selecting elements
                     console.log(`Visual: syncSelectionState - Selecting ${finalDbIds.length} elements`);
                     this.viewer.select(finalDbIds, this.model);
+=======
+        const selectedDbids = this.viewer.getSelection();
+        
+        // Handle filter application to other visuals
+        await this.handleDbIds(selectedDbids);
+
+        if (selectedDbids.length === 0) {
+            this.selectionManager.clear();
+            this.statusDiv.innerText = `Rows: ${this.allRows.length} | Ready`;
+            this.statusDiv.style.color = 'white';
+            return;
+        }
+>>>>>>> 637fefe79f416cc605a6e8b3d4f2c4a2a103b2da
 
                     // Step 5: Highlight nodes with neon green color
                     const neonGreen = new THREE.Vector4(0.224, 1.0, 0.078, 1.0); // #39FF14 in RGB normalized
@@ -791,6 +1185,7 @@ export class Visual implements IVisual {
                         this.isProgrammaticSelection = false;
                     }, 100);
 
+<<<<<<< HEAD
                     console.log(`Visual: syncSelectionState - Successfully isolated, selected and highlighted ${finalDbIds.length} elements (model-browser-like behavior)`);
                 } else {
                     console.error(`Visual: syncSelectionState - No valid DbIds after verification, showing all`);
@@ -803,6 +1198,12 @@ export class Visual implements IVisual {
                 this.viewer.clearSelection();
                 this.viewer.clearThemingColors(this.model);
                 showAll(this.viewer, this.model);
+=======
+        // Iterate map to find matching keys
+        this.elementDataMap.forEach((data, key) => {
+            if (keysToLookup.includes(data.id)) {
+                selectionIds.push(data.selectionId);
+>>>>>>> 637fefe79f416cc605a6e8b3d4f2c4a2a103b2da
             }
         }
         // PATH 2: Show all elements (no isolation)

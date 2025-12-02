@@ -169,7 +169,68 @@ export class IdMapping {
     }
 
     /**
+     * Check if a string ID is clearly an ExternalId (not a numeric dbId)
+     * ExternalIds typically contain letters, hyphens, or are longer than typical dbIds
+     */
+    private isExternalId(id: string): boolean {
+        // If it contains non-numeric characters (except leading/trailing whitespace), it's an ExternalId
+        // Also check if it's a GUID format (contains hyphens)
+        return /[^0-9]/.test(id.trim()) || id.includes('-') || id.length > 10;
+    }
+
+    /**
+     * Map ExternalIds to dbIds using External ID mapping
+     * This is the PRIMARY method when working exclusively with ExternalIds
+     */
+    async mapExternalIdsToDbIds(externalIds: string[]): Promise<number[]> {
+        const validDbIds: number[] = [];
+        const tree = this.model.getInstanceTree();
+        const invalidExternalIds: string[] = [];
+
+        console.log(`Visual: IdMapping - Mapping ${externalIds.length} ExternalIds to dbIds using External ID mapping`);
+        if (externalIds.length > 0) {
+            console.log(`Visual: IdMapping - Sample ExternalIds (first 10):`, externalIds.slice(0, 10));
+        }
+
+        try {
+            const externalIdMapping = await this.externalIdMappingPromise;
+            const totalExternalIdsInMapping = Object.keys(externalIdMapping).length;
+            console.log(`Visual: IdMapping - External ID mapping loaded with ${totalExternalIdsInMapping} entries.`);
+
+            for (const externalId of externalIds) {
+                const mappedDbId = externalIdMapping[externalId];
+                if (mappedDbId != null && !isNaN(mappedDbId)) {
+                    // Validate it exists in model
+                    try {
+                        if (tree && tree.getNodeType(mappedDbId) != null) {
+                            validDbIds.push(mappedDbId);
+                        } else {
+                            invalidExternalIds.push(`${externalId} (mapped to DbId ${mappedDbId} but not in model)`);
+                        }
+                    } catch (e) {
+                        invalidExternalIds.push(`${externalId} (mapped to DbId ${mappedDbId} but not in model)`);
+                    }
+                } else {
+                    invalidExternalIds.push(`${externalId} (not found in External ID mapping)`);
+                }
+            }
+        } catch (error) {
+            console.error("Visual: IdMapping - Failed to load or use External ID mapping.", error);
+        }
+
+        console.log(`Visual: IdMapping - Mapped ${validDbIds.length} of ${externalIds.length} ExternalIds to dbIds`);
+        if (invalidExternalIds.length > 0 && invalidExternalIds.length < 20) {
+            console.warn(`Visual: IdMapping - Invalid/Unmapped ExternalIds:`, invalidExternalIds);
+        } else if (invalidExternalIds.length >= 20) {
+            console.warn(`Visual: IdMapping - ${invalidExternalIds.length} Invalid/Unmapped ExternalIds. Sample:`, invalidExternalIds.slice(0, 20));
+        }
+
+        return validDbIds;
+    }
+
+    /**
      * Smart mapping: tries External ID mapping first, then validates direct DbId
+     * NOTE: When working exclusively with ExternalIds, use mapExternalIdsToDbIds instead
      */
     async smartMapToDbIds(ids: string[]): Promise<number[]> {
         const validDbIds: number[] = [];
@@ -184,9 +245,15 @@ export class IdMapping {
             console.log(`Visual: IdMapping - Sample input IDs (first 10):`, ids.slice(0, 10));
         }
 
-        // Pass 1: Try direct dbId mapping (FAST path, no external ID dependency)
+        // Pass 1: Try direct dbId mapping ONLY for IDs that are clearly numeric (not ExternalIds)
         // This iterates all IDs and tries to validate them as numbers against the InstanceTree
         for (const id of ids) {
+            // Skip if it's clearly an ExternalId (contains non-numeric chars, hyphens, or is too long)
+            if (this.isExternalId(id)) {
+                unmappedIds.push(id);
+                continue;
+            }
+
             const directDbId = parseInt(id, 10);
             if (!isNaN(directDbId) && directDbId > 0) { // dbIds are positive integers
                 try {
@@ -335,7 +402,10 @@ export async function launchViewer(
     applyPerformanceProfile(viewer, performanceProfile);
 
     // Apply default viewer configuration (pass the container for proper positioning)
-    applyDefaultViewerConfiguration(viewer, container);
+    // Use setTimeout to ensure toolbar is created before scaling
+    setTimeout(() => {
+        applyDefaultViewerConfiguration(viewer, container);
+    }, 100);
 
     // Setup Selection Listener
     viewer.addEventListener(Autodesk.Viewing.SELECTION_CHANGED_EVENT, (ev: any) => {
@@ -378,8 +448,37 @@ export function applyDefaultViewerConfiguration(viewer: Autodesk.Viewing.GuiView
     // Set environment to "Plaza" (ID: 8)
     viewer.setLightPreset(8);
 
-    // Toolbar mantiene su configuración por defecto (centro, horizontal)
-    // Las extensiones se cargarán automáticamente sin modificar la posición/orientación de la toolbar
+    // Reduce toolbar size to 65%
+    // Try multiple ways to access toolbar element
+    let toolbarElement: HTMLElement | null = null;
+    
+    if (viewer.toolbar) {
+        // Try container property
+        toolbarElement = (viewer.toolbar as any).container as HTMLElement;
+        
+        // If not found, try to find toolbar in DOM
+        if (!toolbarElement) {
+            const toolbarInDom = document.querySelector('.adsk-viewing-viewer-toolbar') as HTMLElement;
+            if (toolbarInDom) {
+                toolbarElement = toolbarInDom;
+            }
+        }
+        
+        // If still not found, try viewer's toolbar container
+        if (!toolbarElement && (viewer as any).toolbarContainer) {
+            toolbarElement = (viewer as any).toolbarContainer as HTMLElement;
+        }
+    }
+    
+    if (toolbarElement) {
+        toolbarElement.style.transform = 'scale(0.65)';
+        toolbarElement.style.transformOrigin = 'center center';
+        // Ensure toolbar remains visible and functional
+        toolbarElement.style.opacity = '1';
+        console.log('Visual: Toolbar scaled to 65%');
+    } else {
+        console.warn('Visual: Could not find toolbar element to scale');
+    }
 
-    console.log('Visual: Applied default viewer configuration (large model mode, Plaza, default toolbar)');
+    console.log('Visual: Applied default viewer configuration (large model mode, Plaza, toolbar scaled to 65%)');
 }

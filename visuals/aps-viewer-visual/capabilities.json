@@ -6,8 +6,8 @@
             "kind": "Grouping"
         },
         {
-            "displayName": "DbIds",
-            "name": "dbids",
+            "displayName": "External IDs",
+            "name": "externalIds",
             "kind": "Grouping"
         },
         {
@@ -33,7 +33,7 @@
                         },
                         {
                             "for": {
-                                "in": "dbids"
+                                "in": "externalIds"
                             }
                         },
                         {
@@ -54,7 +54,7 @@
                     "select": [
                         {
                             "bind": {
-                                "to": "dbids"
+                                "to": "externalIds"
                             }
                         }
                     ]

@@ -6,8 +6,8 @@
             "kind": "Grouping"
         },
         {
-            "displayName": "DbIds",
-            "name": "dbids",
+            "displayName": "ExternalIds",
+            "name": "externalIds",
             "kind": "Grouping"
         },
         {
@@ -33,7 +33,7 @@
                         },
                         {
                             "for": {
-                                "in": "dbids"
+                                "in": "externalIds"
                             }
                         },
                         {
@@ -46,37 +46,12 @@
                                 "in": "color"
                             }
                         }
-                    ]
-                }
-            },
-            "categorical": {
-                "categories": {
-                    "select": [
-                        {
-                            "bind": {
-                                "to": "dbids"
-                            }
+                    ],
+                    "dataReductionAlgorithm": {
+                        "window": {
+                            "count": 30000
                         }
-                    ]
-                },
-                "values": {
-                    "select": [
-                        {
-                            "bind": {
-                                "to": "urn"
-                            }
-                        },
-                        {
-                            "bind": {
-                                "to": "guid"
-                            }
-                        },
-                        {
-                            "bind": {
-                                "to": "color"
-                            }
-                        }
-                    ]
+                    }
                 }
             }
         }

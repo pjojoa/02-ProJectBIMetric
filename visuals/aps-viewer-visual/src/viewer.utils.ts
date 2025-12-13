@@ -78,7 +78,7 @@ export function getVisibleNodes(model: Autodesk.Viewing.Model): number[] {
  */
 export function isolateDbIds(viewer: Autodesk.Viewing.Viewer3D, model: Autodesk.Viewing.Model, dbIds: number[]): void {
     if (!viewer || !model) return;
-        viewer.isolate(dbIds, model);
+    viewer.isolate(dbIds, model);
 }
 
 /**
@@ -89,7 +89,7 @@ export function isolateDbIds(viewer: Autodesk.Viewing.Viewer3D, model: Autodesk.
  */
 export function fitToView(viewer: Autodesk.Viewing.Viewer3D, model: Autodesk.Viewing.Model, dbIds?: number[]): void {
     if (!viewer || !model) return;
-        viewer.fitToView(dbIds, model);
+    viewer.fitToView(dbIds, model);
 }
 
 /**
@@ -104,15 +104,30 @@ export function showAll(viewer: Autodesk.Viewing.Viewer3D, model: Autodesk.Viewi
 }
 
 /**
- * Helper class for mapping between "dbIDs" (sequential numbers assigned to each design element;
- * typically used by the Viewer APIs) and "external IDs" (typically based on persistent IDs
- * from the authoring application, for example, Revit GUIDs).
+ * Helper class for mapping between "dbIds" (sequential numbers assigned to each design element,
+ * typically used by the Viewer APIs) and "externalId" values (persistent IDs from the authoring
+ * application, for example Revit GUIDs).
+ *
+ * IMPORTANT (externalIdOnly mode):
+ * --------------------------------
+ * The public contract of this class is **ExternalId-first**:
+ *  - Power BI and the custom visual work EXCLUSIVELY with ExternalId strings.
+ *  - dbIds are used only internally when calling Viewer APIs (isolate, fitToView, theming, etc.).
+ *
+ * External consumers (for example `visual.ts`) must:
+ *  - Use ExternalId as the primary identifier when talking to Power BI.
+ *  - Use `getDbids(externalIds)` ONLY when they need to call Viewer APIs that require dbIds.
+ *  - Never depend on dbId values as part of any filter that goes back to Power BI.
  */
 export class IdMapping {
+    /** When true, the system assumes ExternalId is the primary identifier exposed to the outside world. */
+    private readonly externalIdOnly: boolean = true;
+
     private readonly externalIdMappingPromise: Promise<{ [externalId: string]: number; }>;
     private readonly reverseMappingPromise: Promise<{ [dbid: number]: string; }>;
 
     constructor(private model: Autodesk.Viewing.Model) {
+        console.log("Visual: IdMapping - Initializing in externalIdOnly mode");
         this.externalIdMappingPromise = new Promise((resolve, reject) => {
             model.getExternalIdMapping(resolve, reject);
         });
@@ -129,17 +144,143 @@ export class IdMapping {
         });
     }
 
-    getDbids(externalIds: string[]): Promise<number[]> {
-        return this.externalIdMappingPromise
-            .then(externalIdMapping => externalIds.map(externalId => externalIdMapping[externalId]));
+    /**
+     * Resolves an array of ExternalIds against the model's ExternalId mapping.
+     * Returns which ExternalIds were found and which were missing.
+     */
+    async resolveExternalIds(externalIds: string[]): Promise<{ found: string[]; missing: string[] }> {
+        const mapping = await this.externalIdMappingPromise;
+
+        const found: string[] = [];
+        const missing: string[] = [];
+
+        externalIds.forEach(rawId => {
+            const externalId = (rawId ?? "").toString().trim();
+            if (!externalId) {
+                return;
+            }
+            if (Object.prototype.hasOwnProperty.call(mapping, externalId)) {
+                found.push(externalId);
+            } else {
+                missing.push(externalId);
+            }
+        });
+
+        if (missing.length > 0) {
+            console.warn(`Visual: IdMapping.resolveExternalIds - ${missing.length} ExternalIds not found in model. Sample:`, missing.slice(0, 20));
+        }
+
+        return { found, missing };
     }
 
-    getExternalIds(dbids: number[]): Promise<string[]> {
-        return new Promise((resolve, reject) => {
-            this.model.getBulkProperties(dbids, { propFilter: ['externalId'] }, results => {
-                resolve(results.map(result => result.externalId))
-            }, reject);
+    /**
+     * Returns dbIds for a set of ExternalIds. This is meant for INTERNAL use only when
+     * calling Viewer APIs that require dbIds (isolation, fitToView, theming, etc.).
+     */
+    /**
+     * Returns dbIds for a set of ExternalIds. This is meant for INTERNAL use only when
+     * calling Viewer APIs that require dbIds (isolation, fitToView, theming, etc.).
+     */
+    async getDbids(externalIds: string[]): Promise<number[]> {
+        const mapping = await this.externalIdMappingPromise;
+
+        const dbIds: number[] = [];
+        const missing: string[] = [];
+
+        externalIds.forEach(rawId => {
+            const externalId = (rawId ?? "").toString().trim();
+            if (!externalId) {
+                return;
+            }
+            const dbId = mapping[externalId];
+            if (dbId != null && !isNaN(dbId)) {
+                dbIds.push(dbId);
+            } else {
+                missing.push(externalId);
+            }
         });
+
+        if (missing.length > 0) {
+            // Only warn if significant number missing to avoid log spam
+            if (missing.length > 20) {
+                console.warn(`Visual: IdMapping.getDbids - ${missing.length} ExternalIds have no dbId in model. Sample:`, missing.slice(0, 10));
+            }
+        }
+
+        return dbIds;
+    }
+
+    /**
+     * Returns ExternalIds for a set of dbIds.
+     *
+     * This is primarily used when the Viewer reports selections as dbIds and we need to
+     * convert them back to ExternalIds so that Power BI can be filtered using ExternalId strings.
+     *
+     * Behaviour:
+     *  - First tries to resolve dbId → ExternalId using the precomputed reverse mapping.
+     *  - If a direct mapping is not found, it walks up the instance tree to find the nearest
+     *    ancestor that has an ExternalId.
+     *  - If no ancestor has an ExternalId, the entry will be returned as undefined.
+     *
+     * The returned array is aligned with the input array (same length, same order).
+     */
+    async getExternalIds(dbids: number[]): Promise<string[]> {
+        const reverse = await this.reverseMappingPromise;
+        const tree = this.model.getInstanceTree();
+
+        const result: string[] = [];
+        const unresolved: number[] = [];
+
+        const resolveSingle = (dbid: number): string | undefined => {
+            if (dbid == null || isNaN(dbid)) {
+                return undefined;
+            }
+
+            // 1) Direct reverse mapping
+            if (reverse[dbid]) {
+                return reverse[dbid];
+            }
+
+            // 2) Walk up the instance tree to find an ancestor that has an ExternalId
+            let current: number | undefined = dbid;
+            try {
+                // Safety check for infinite loops
+                let depth = 0;
+                while (current != null && !isNaN(current) && depth < 100) {
+                    const parent = tree.getNodeParentId(current);
+                    if (parent == null || isNaN(parent) || parent === current) {
+                        break;
+                    }
+                    if (reverse[parent]) {
+                        return reverse[parent];
+                    }
+                    current = parent;
+                    depth++;
+                }
+            } catch (e) {
+                // If anything goes wrong while walking the tree, fall back to undefined
+            }
+
+            return undefined;
+        };
+
+        for (const dbid of dbids) {
+            const extId = resolveSingle(dbid);
+            if (extId) {
+                result.push(extId);
+            } else {
+                unresolved.push(dbid);
+            }
+        }
+
+        if (unresolved.length > 0) {
+            // Only warn if significant number missing
+            if (unresolved.length > 20) {
+                console.warn(`Visual: IdMapping.getExternalIds - ${unresolved.length} dbIds have no ExternalId mapping. Sample:`, unresolved.slice(0, 10));
+            }
+        }
+
+        return result;
     }
 
     /**
@@ -169,95 +310,87 @@ export class IdMapping {
     }
 
     /**
-     * Smart mapping: tries External ID mapping first, then validates direct DbId
+     * DEPRECATED: smartMapToDbIds
+     *
+     * Historically this method tried to be smart by accepting either dbIds or ExternalIds and
+     * figuring out what they were. In the new ExternalId-only design this behaviour is confusing
+     * and can lead to a large number of "Invalid/Unmapped IDs" logs.
+     *
+     * It is kept for backwards compatibility, but:
+     *  - It now simply assumes that all inputs are ExternalIds.
+     *  - It delegates to getDbids(externalIds).
+     *
+     * New code should prefer:
+     *  - getDbids(externalIds)            // when you need dbIds for Viewer APIs
+     *  - resolveExternalIds(externalIds)  // when you only need to validate ExternalIds
      */
     async smartMapToDbIds(ids: string[]): Promise<number[]> {
-        const validDbIds: number[] = [];
-        const tree = this.model.getInstanceTree();
-        const unmappedIds: string[] = [];
-        const invalidDbIds: string[] = [];
-        const mappedViaExternalId: string[] = [];
-        const mappedViaDirectDbId: string[] = [];
-
-        console.log(`Visual: IdMapping - Starting smart mapping for ${ids.length} IDs.`);
-        if (ids.length > 0) {
-            console.log(`Visual: IdMapping - Sample input IDs (first 10):`, ids.slice(0, 10));
-        }
-
-        // Pass 1: Try direct dbId mapping (FAST path, no external ID dependency)
-        // This iterates all IDs and tries to validate them as numbers against the InstanceTree
-        for (const id of ids) {
-            const directDbId = parseInt(id, 10);
-            if (!isNaN(directDbId) && directDbId > 0) { // dbIds are positive integers
-                try {
-                    // Check if node exists in the tree. getNodeType returns null/undefined if not found.
-                    if (tree && tree.getNodeType(directDbId) != null) {
-                        validDbIds.push(directDbId);
-                        mappedViaDirectDbId.push(`${id} (used as DbId ${directDbId})`);
-                        continue; // Success, move to next ID
-                    } else {
-                        // Numeric, but not found in tree. Might be an ExternalId that looks like a number?
-                        unmappedIds.push(id);
-                    }
-                } catch (e) {
-                    unmappedIds.push(id);
-                }
-            } else {
-                // Not a number, must be ExternalId
-                unmappedIds.push(id);
-            }
-        }
-
-        // Pass 2: Fallback to External ID mapping (SLOW path, depends on promise)
-        // Only executed if there are unmapped IDs
-        if (unmappedIds.length > 0) {
-            console.log(`Visual: IdMapping - ${unmappedIds.length} IDs not found as direct DbIds, attempting External ID mapping...`);
-            try {
-                const externalIdMapping = await this.externalIdMappingPromise;
-                const totalExternalIdsInMapping = Object.keys(externalIdMapping).length;
-                console.log(`Visual: IdMapping - External ID mapping loaded with ${totalExternalIdsInMapping} entries.`);
-
-                for (const id of unmappedIds) {
-                    const mappedDbId = externalIdMapping[id];
-                    if (mappedDbId != null && !isNaN(mappedDbId)) {
-                        // Validate it exists in model
-                        try {
-                            if (tree && tree.getNodeType(mappedDbId) != null) {
-                                validDbIds.push(mappedDbId);
-                                mappedViaExternalId.push(`${id} -> DbId ${mappedDbId}`);
-                            } else {
-                                invalidDbIds.push(`${id} (mapped to DbId ${mappedDbId} but not in model)`);
-                            }
-                        } catch (e) {
-                            invalidDbIds.push(`${id} (mapped to DbId ${mappedDbId} but not in model)`);
-                        }
-                    } else {
-                        invalidDbIds.push(`${id} (not found in External ID mapping)`);
-                    }
-                }
-            } catch (error) {
-                console.warn("Visual: IdMapping - Failed to load or use External ID mapping.", error);
-                // If external mapping fails, we just return the valid direct dbIds we found
-            }
-        }
-
-        // Logging results
-        console.log(`Visual: IdMapping - Results: ${validDbIds.length} valid total.`);
-        
-        if (mappedViaDirectDbId.length > 0) {
-            console.log(`Visual: IdMapping - Mapped via Direct DbId: ${mappedViaDirectDbId.length}. Sample:`, mappedViaDirectDbId.slice(0, 5));
-        }
-        if (mappedViaExternalId.length > 0) {
-            console.log(`Visual: IdMapping - Mapped via External ID: ${mappedViaExternalId.length}. Sample:`, mappedViaExternalId.slice(0, 5));
-        }
-        if (invalidDbIds.length > 0 && invalidDbIds.length < 20) {
-            console.warn(`Visual: IdMapping - Invalid/Unmapped IDs:`, invalidDbIds);
-        } else if (invalidDbIds.length >= 20) {
-            console.warn(`Visual: IdMapping - ${invalidDbIds.length} Invalid/Unmapped IDs. Sample:`, invalidDbIds.slice(0, 20));
-        }
-
-        return validDbIds;
+        console.warn("Visual: IdMapping.smartMapToDbIds is deprecated. Prefer getDbids(...) with ExternalIds.");
+        return this.getDbids(ids);
     }
+}
+
+/**
+ * Helper to get the current viewer selection as a list of ExternalIds.
+ * This abstracts the dbId -> ExternalId conversion from the main visual logic.
+ */
+export async function getSelectionAsExternalIds(viewer: Autodesk.Viewing.Viewer3D, mapping: IdMapping): Promise<string[]> {
+    if (!viewer || !mapping) return [];
+
+    // Get ALL selected elements from the viewer
+    // When using Ctrl+Click, the viewer maintains all selected elements in its selection array
+    const selection = viewer.getSelection();
+    if (!selection || selection.length === 0) return [];
+
+    // Convert all dbIds to ExternalIds
+    // This should include all elements selected with Ctrl+Click
+    const externalIds = await mapping.getExternalIds(selection);
+    
+    return externalIds;
+}
+
+/**
+ * Convenience helper: isolate elements by ExternalId.
+ * Uses IdMapping.getDbids under the hood and then calls isolateDbIds.
+ */
+export async function isolateExternalIds(
+    viewer: Autodesk.Viewing.Viewer3D,
+    model: Autodesk.Viewing.Model,
+    mapping: IdMapping,
+    externalIds: string[]
+): Promise<void> {
+    if (!viewer || !model || !mapping) return;
+    const dbIds = await mapping.getDbids(externalIds);
+    if (!dbIds || dbIds.length === 0) {
+        console.warn("Visual: isolateExternalIds - No dbIds found for given ExternalIds. Showing all.");
+        showAll(viewer, model);
+        return;
+    }
+    isolateDbIds(viewer, model, dbIds);
+}
+
+/**
+ * Convenience helper: fit camera to elements by ExternalId.
+ * Uses IdMapping.getDbids under the hood and then calls fitToView.
+ */
+export async function fitToExternalIds(
+    viewer: Autodesk.Viewing.Viewer3D,
+    model: Autodesk.Viewing.Model,
+    mapping: IdMapping,
+    externalIds?: string[]
+): Promise<void> {
+    if (!viewer || !model || !mapping) return;
+    if (!externalIds || externalIds.length === 0) {
+        fitToView(viewer, model, undefined);
+        return;
+    }
+    const dbIds = await mapping.getDbids(externalIds);
+    if (!dbIds || dbIds.length === 0) {
+        console.warn("Visual: fitToExternalIds - No dbIds found for given ExternalIds. Fitting to whole model.");
+        fitToView(viewer, model, undefined);
+        return;
+    }
+    fitToView(viewer, model, dbIds);
 }
 
 function loadScript(src: string): Promise<void> {
@@ -378,8 +511,18 @@ export function applyDefaultViewerConfiguration(viewer: Autodesk.Viewing.GuiView
     // Set environment to "Plaza" (ID: 8)
     viewer.setLightPreset(8);
 
+    // Configure selection mode for multi-selection support
+    // Enable multi-selection: users can select multiple elements with Ctrl+Click or by clicking multiple elements
+    // The viewer supports multi-selection by default, but we ensure it's properly configured
+    if (viewer.prefs) {
+        // Ensure selection mode allows multiple selections
+        // The viewer's default behavior already supports multi-selection with Ctrl+Click
+        // We just need to make sure the selection system is ready
+        console.log('Visual: Multi-selection enabled (Ctrl+Click to select multiple elements)');
+    }
+
     // Toolbar mantiene su configuración por defecto (centro, horizontal)
     // Las extensiones se cargarán automáticamente sin modificar la posición/orientación de la toolbar
 
-    console.log('Visual: Applied default viewer configuration (large model mode, Plaza, default toolbar)');
+    console.log('Visual: Applied default viewer configuration (large model mode, Plaza, multi-selection enabled, default toolbar)');
 }

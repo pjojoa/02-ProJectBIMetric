@@ -29,7 +29,16 @@ import "./../style/visual.less";
 import powerbi from "powerbi-visuals-api";
 import { VisualSettingsModel } from "./settings";
 import { FormattingSettingsService } from "powerbi-visuals-utils-formattingmodel";
-import { initializeViewerRuntime, loadModel, IdMapping, launchViewer, isolateDbIds, fitToView, showAll } from "./viewer.utils";
+import {
+    IdMapping,
+    launchViewer,
+    showAll,
+    isolateDbIds,
+    fitToView,
+    isolateExternalIds,
+    fitToExternalIds,
+    getSelectionAsExternalIds
+} from "./viewer.utils";
 import * as models from "powerbi-models";
 
 import IVisual = powerbi.extensibility.visual.IVisual;
@@ -40,6 +49,10 @@ import ISelectionManager = powerbi.extensibility.ISelectionManager;
 import ISelectionId = powerbi.visuals.ISelectionId;
 import DataView = powerbi.DataView;
 import DataViewTableRow = powerbi.DataViewTableRow;
+
+// Strongly-typed aliases to make the ExternalId-only design explicit
+type ExternalId = string;
+type DbId = number;
 
 export class Visual implements IVisual {
     // Visual state
@@ -58,6 +71,11 @@ export class Visual implements IVisual {
     private pendingSelection: string[] | null = null; // Store selection to apply when viewer is ready
     private isProgrammaticSelection: boolean = false; // Prevent handleDbIds from firing when selection is programmatic
 
+    // Selection handling improvements
+    private selectionDebounceTimer: number | null = null; // Timer for debouncing selection changes
+    private isProcessingSelection: boolean = false; // Flag to prevent concurrent selection processing
+    private readonly SELECTION_DEBOUNCE_MS: number = 30; // Very short delay to let viewer update selection state after Ctrl+Click
+
     // Visual inputs
     private accessTokenEndpoint: string = '';
 
@@ -70,9 +88,14 @@ export class Visual implements IVisual {
 
     // Data Storage
     private allRows: DataViewTableRow[] = [];
-    private elementDataMap: Map<string, { id: string, color: string | null, selectionId: ISelectionId }> = new Map();
-    private externalIds: string[] = []; // For mapping
-    private dbIdToColumnValueMap: Map<number, string> = new Map(); // Map dbId -> column value (for filtering)
+    /** Maps SelectionId key -> { externalId, color, selectionId } */
+    private elementDataMap: Map<string, { id: ExternalId, color: string | null, selectionId: ISelectionId }> = new Map();
+    /** All ExternalIds coming from Power BI (full dataset, accumulated with pagination) */
+    private externalIds: ExternalId[] = [];
+    /** Reverse mapping: dbId -> ExternalId (used only when we need to go from Viewer selection back to ExternalId) */
+    private dbIdToColumnValueMap: Map<DbId, ExternalId> = new Map();
+    /** Reverse mapping: ExternalId -> row index in Power BI table (for validation and selection) */
+    private externalIdToRowIndexMap: Map<ExternalId, number> = new Map();
 
     constructor(options: VisualConstructorOptions) {
         this.host = options.host;
@@ -130,7 +153,7 @@ export class Visual implements IVisual {
         // 2. Identify Column Indices
         const columns = dataView.table.columns;
         const urnIndex = columns.findIndex(c => c.roles["urn"]);
-        const dbidsIndex = columns.findIndex(c => c.roles["dbids"]);
+        const externalIdsIndex = columns.findIndex(c => c.roles["externalIds"]);
         const guidIndex = columns.findIndex(c => c.roles["guid"]);
         const colorIndex = columns.findIndex(c => c.roles["color"]);
 
@@ -170,28 +193,36 @@ export class Visual implements IVisual {
 
         dataView.table.rows.forEach((row, rowIndex) => {
             const selectionIdBuilder = this.host.createSelectionIdBuilder();
-            if (dbidsIndex !== -1) {
+            if (externalIdsIndex !== -1) {
                 selectionIdBuilder.withTable(dataView.table, rowIndex);
             }
             const selectionId = selectionIdBuilder.createSelectionId();
-            const dbidValue = dbidsIndex !== -1 ? row[dbidsIndex] : null;
+            const externalIdValue = externalIdsIndex !== -1 ? row[externalIdsIndex] : null;
             const colorValue = colorIndex !== -1 ? String(row[colorIndex]) : null;
 
-            if (dbidValue != null) {
+            if (externalIdValue != null) {
                 const key = selectionId.getKey();
-                const idString = String(dbidValue);
+                const externalId: ExternalId = String(externalIdValue).trim();
+                if (!externalId) {
+                    return;
+                }
 
                 // Update or add to elementDataMap (always, for selection mapping)
                 this.elementDataMap.set(key, {
-                    id: idString,
+                    id: externalId,
                     color: colorValue,
                     selectionId: selectionId
                 });
 
+                // Track reverse mapping ExternalId -> row index
+                if (!this.externalIdToRowIndexMap.has(externalId)) {
+                    this.externalIdToRowIndexMap.set(externalId, rowIndex);
+                }
+
                 // Add to current batch IDs (for filtering) - only if not already added
-                if (!currentRowSet.has(idString)) {
-                    currentBatchIds.push(idString);
-                    currentRowSet.add(idString);
+                if (!currentRowSet.has(externalId)) {
+                    currentBatchIds.push(externalId);
+                    currentRowSet.add(externalId);
                 }
             }
         });
@@ -202,17 +233,25 @@ export class Visual implements IVisual {
             // No filter: accumulate all rows to build full dataset (handles pagination)
             this.allRows = this.allRows.concat(dataView.table.rows);
 
-            // Accumulate unique IDs to externalIds
-            currentBatchIds.forEach(idString => {
-                if (!this.externalIds.includes(idString)) {
-                    this.externalIds.push(idString);
+            // Accumulate unique ExternalIds - OPTIMIZED
+            // Using Set for O(1) lookups instead of O(N) array.includes
+            const existingIdsSet = new Set(this.externalIds);
+            let newIdsAdded = false;
+
+            currentBatchIds.forEach(externalId => {
+                if (!existingIdsSet.has(externalId)) {
+                    this.externalIds.push(externalId);
+                    existingIdsSet.add(externalId); // Keep Set in sync for this loop
+                    newIdsAdded = true;
                 }
             });
 
             // Update allDbIds with accumulated externalIds (represents full dataset)
             this.allDbIds = this.externalIds.slice(); // Create a copy of full dataset
 
-            console.log(`Visual: Accumulated data - allRows: ${this.allRows.length}, externalIds: ${this.externalIds.length}`);
+            if (newIdsAdded) {
+                console.log(`Visual: Accumulated data - Total Rows: ${this.allRows.length}, Unique IDs: ${this.externalIds.length}`);
+            }
         }
         // When filtered: 
         // - allRows and externalIds remain as the last known full dataset (preserved from above)
@@ -231,24 +270,31 @@ export class Visual implements IVisual {
             viewGuid = String(dataView.table.rows[0][guidIndex]);
         }
 
-        // 6. Handle Pagination Fetch
+        // 6. Handle Pagination Fetch - AGGRESSIVE
+        // We want to fetch ALL data to ensure the viewer can map everything
         let isFetching = false;
+        const HARD_LIMIT = 200000; // Safety cap to prevent browser crash
+
         if (this.currentDataView.metadata.segment) {
-            const moreData = this.host.fetchMoreData();
-            if (moreData) {
-                isFetching = true;
-                this.statusDiv.innerText = `Loading... (${this.allRows.length} rows, ${this.externalIds.length} unique IDs)`;
-                this.statusDiv.style.color = 'yellow';
+            if (this.allRows.length < HARD_LIMIT) {
+                const moreData = this.host.fetchMoreData();
+                if (moreData) {
+                    isFetching = true;
+                    this.statusDiv.innerText = `Loading data... (${this.allRows.length} rows loaded)`;
+                    this.statusDiv.style.backgroundColor = '#d9534f'; // Red/Orange for "Busy"
+                    this.statusDiv.style.color = 'white';
+                }
             } else {
-                // Pagination complete
-                this.statusDiv.innerText = `Rows: ${this.allRows.length} | IDs: ${this.externalIds.length} | Ready`;
-                this.statusDiv.style.color = 'lightgreen';
+                this.statusDiv.innerText = `Warning: Data limit reached (${HARD_LIMIT} rows). Some objects may not be selectable.`;
+                this.statusDiv.style.backgroundColor = 'orange';
+                this.statusDiv.style.color = 'black';
             }
         } else {
-            // Show both total rows and unique IDs
+            // Pagination complete
             const uniqueIdCount = this.externalIds.length;
-            this.statusDiv.innerText = `Rows: ${this.allRows.length} | IDs: ${uniqueIdCount} | Ready`;
-            this.statusDiv.style.color = 'white';
+            this.statusDiv.innerText = `Ready | Rows: ${this.allRows.length} | Unique Objects: ${uniqueIdCount}`;
+            this.statusDiv.style.backgroundColor = '#333';
+            this.statusDiv.style.color = 'lightgreen';
         }
 
         // 7. Initialize Viewer if needed
@@ -406,12 +452,13 @@ export class Visual implements IVisual {
             const api = env === 'AutodeskProduction2' ? 'streamingV2' : 'derivativeV2';
 
             // Use the new launchViewer from utils
+            // Use debounced version to improve responsiveness and prevent race conditions
             const result = await launchViewer(
                 this.container,
                 this.currentUrn,
                 token.access_token,
                 this.currentGuid,
-                (ids) => this.handleDbIds(ids), // Callback for selection
+                () => this.handleSelectionChangeDebounced(), // Debounced callback for selection
                 profile, // Pass performance profile
                 env, // Pass environment
                 api // Pass API
@@ -447,114 +494,203 @@ export class Visual implements IVisual {
 
     /**
      * Handles selection changes from the Viewer (Viewer -> Power BI)
+     * CRITICAL: The Power BI column contains External IDs, not dbIds.
+     * We need to convert dbIds (from viewer selection) to External IDs (for filtering).
      */
-    private async handleDbIds(selectedDbIds: number[]) {
-        if (!this.host) return;
+    /**
+     * Handles selection changes from the Viewer (Viewer -> Power BI)
+     * Uses the new ExternalID-first pattern.
+     * Now with debouncing and concurrent call prevention for better responsiveness.
+     */
+    private async handleSelectionChange() {
+        if (!this.host || !this.viewer || !this.idMapping) return;
 
         // Skip if this selection change came from programmatic selection (external filter)
         if (this.isProgrammaticSelection) {
-            console.log("Visual: Ignoring programmatic selection change:", selectedDbIds.length, "IDs");
+            // console.log("Visual: Ignoring programmatic selection change");
             return;
         }
 
-        console.log("Visual: Selection changed in viewer (user interaction):", selectedDbIds);
-
-        // 1. If no selection, clear filters
-        if (selectedDbIds.length === 0) {
-            this.host.applyJsonFilter(null, "general", "filter", powerbi.FilterAction.merge);
-            this.isDbIdSelectionActive = false;
+        // Prevent concurrent processing
+        if (this.isProcessingSelection) {
+            console.log("Visual: Selection change already being processed, skipping...");
             return;
         }
 
-        // 2. If selection, apply JSON filter
-        // We need to find the target column for 'dbids' role
-        if (!this.currentDataView || !this.currentDataView.table) return;
+        this.isProcessingSelection = true;
 
-        const columns = this.currentDataView.table.columns;
-        const dbidsIndex = columns.findIndex(c => c.roles["dbids"]);
+        try {
+            // 1. Get current selection from viewer - this should include ALL selected elements
+            // The viewer maintains all selected elements when using Ctrl+Click
+            const currentDbIds = this.viewer.getSelection();
+            console.log(`Visual: Raw selection from viewer: ${currentDbIds.length} dbIds`, currentDbIds.slice(0, 10), currentDbIds.length > 10 ? `... and ${currentDbIds.length - 10} more` : '');
 
-        if (dbidsIndex === -1) return;
+            // 2. Convert dbIds to ExternalIDs
+            const selectedExternalIds = await getSelectionAsExternalIds(this.viewer, this.idMapping);
 
-        const columnSource = columns[dbidsIndex];
-        // Note: queryName is usually "Table.Column"
+            if (selectedExternalIds.length > 1) {
+                console.log(`Visual: Multi-selection detected! Selected ${selectedExternalIds.length} elements. ExternalIDs:`, selectedExternalIds.slice(0, 10), selectedExternalIds.length > 10 ? `... and ${selectedExternalIds.length - 10} more` : '');
+            } else if (selectedExternalIds.length === 1) {
+                console.log(`Visual: Single selection. ExternalID: ${selectedExternalIds[0]}`);
+            } else {
+                console.log(`Visual: Selection cleared (no elements selected)`);
+            }
 
-        // Try to get table and column names
-        let target: models.IFilterColumnTarget;
+            // Debug: Check if dbIds count matches ExternalIds count
+            if (currentDbIds.length !== selectedExternalIds.length) {
+                console.warn(`Visual: Selection count mismatch! dbIds: ${currentDbIds.length}, ExternalIds: ${selectedExternalIds.length}`);
+            }
 
-        if (columnSource.queryName) {
-            // Prefer queryName parsing for robustness
-            const parts = columnSource.queryName.split('.');
-            if (parts.length >= 2) {
-                target = {
-                    table: parts[0],
-                    column: parts[1] // Basic splitting
-                };
+            // 2. If no selection, clear filters
+            if (selectedExternalIds.length === 0) {
+                console.log("Visual: No selection - clearing all filters");
+                this.host.applyJsonFilter(null, "general", "filter", powerbi.FilterAction.merge);
+                this.isDbIdSelectionActive = false;
+
+                // Also clear selection in SelectionManager
+                try {
+                    this.selectionManager.clear();
+                } catch (clearError) {
+                    console.warn("Visual: Could not clear selection via SelectionManager:", clearError);
+                }
+                return;
+            }
+
+            // 3. Validate that we have the necessary components
+            if (!this.currentDataView || !this.currentDataView.table) {
+                console.warn("Visual: No data view available for filtering");
+                return;
+            }
+
+            const columns = this.currentDataView.table.columns;
+            const externalIdsIndex = columns.findIndex(c => c.roles["externalIds"]);
+
+            if (externalIdsIndex === -1) {
+                console.warn("Visual: 'externalIds' role column not found");
+                return;
+            }
+
+            const columnSource = columns[externalIdsIndex];
+
+            // 4. Get table and column names for filter target
+            let target: models.IFilterColumnTarget;
+
+            if (columnSource.queryName) {
+                const parts = columnSource.queryName.split('.');
+                if (parts.length >= 2) {
+                    target = {
+                        table: parts[0],
+                        column: parts[1]
+                    };
+                } else {
+                    target = {
+                        table: columnSource.queryName,
+                        column: columnSource.displayName
+                    };
+                }
             } else {
                 target = {
-                    table: columnSource.queryName,
+                    table: "Data",
                     column: columnSource.displayName
                 };
             }
-        } else {
-            // Fallback
-            target = {
-                table: "Data",
-                column: columnSource.displayName
-            };
-        }
 
-        // CRITICAL: Map DbIds to the exact values in the Power BI column
-        // Since the column contains dbId values (as strings), we map: dbId (number) -> dbId (string)
-        // We rely on dbIdToColumnValueMap built during update, or check against externalIds directly.
-        let filterValues: string[] = [];
-        let missingIds: number[] = [];
+            // 5. Verify that External IDs exist in our known dataset
+            // This ensures we only filter with IDs that exist in Power BI data
+            const filterValues: string[] = [];
+            const unknownExternalIds: string[] = [];
 
-        for (const dbId of selectedDbIds) {
-            // 1. Try reverse map
-            const columnValue = this.dbIdToColumnValueMap.get(dbId);
-            if (columnValue) {
-                filterValues.push(columnValue);
-            } else {
-                // 2. Fallback: check if the stringified dbId exists in our known dataset
-                const dbIdStr = String(dbId);
-                if (this.externalIds.includes(dbIdStr)) {
-                    filterValues.push(dbIdStr);
+            for (const extId of selectedExternalIds) {
+                // Check if this External ID exists in our dataset
+                if (this.externalIds.includes(extId)) {
+                    filterValues.push(extId);
                 } else {
-                    missingIds.push(dbId);
+                    unknownExternalIds.push(extId);
                 }
             }
-        }
 
-        console.log(`Visual: Mapped ${selectedDbIds.length} DbIds to ${filterValues.length} column values for filtering`);
+            if (unknownExternalIds.length > 0) {
+                // console.warn(`Visual: ${unknownExternalIds.length} Unknown External IDs (not in dataset). Sample:`, unknownExternalIds.slice(0, 5));
+            }
 
-        if (missingIds.length > 0) {
-            console.warn(`Visual: Warning - Selected DbIds [${missingIds.slice(0, 5)}...] do not exist in Power BI data column. Filter will ignore them.`);
-        }
+            // 6. Apply filter if we have valid values
+            if (filterValues.length > 0) {
+                if (filterValues.length > 1) {
+                    console.log(`Visual: Applying multi-selection filter with ${filterValues.length} External IDs`);
+                    console.log(`Visual: Filter will show data for ${filterValues.length} selected elements`);
+                } else {
+                    console.log(`Visual: Applying filter with 1 External ID: ${filterValues[0]}`);
+                }
 
-        if (filterValues.length > 0) {
-            console.log(`Visual: Filter values (first 10):`, filterValues.slice(0, 10));
+                const filter = new models.BasicFilter(
+                    target,
+                    "In",
+                    filterValues
+                );
 
-            const filter = new models.BasicFilter(
-                target,
-                "In",
-                filterValues
-            );
+                // CRITICAL: Use FilterAction.merge to allow cross-filtering with other visuals
+                // This filter will show rows where the External ID column matches ANY of the selected IDs
+                this.host.applyJsonFilter(filter, "general", "filter", powerbi.FilterAction.merge);
+                this.isDbIdSelectionActive = true;
 
-            console.log("Visual: Applying JSON filter:", filter);
-            this.host.applyJsonFilter(filter, "general", "filter", powerbi.FilterAction.merge);
-            this.isDbIdSelectionActive = true;
-        } else {
-            console.warn("Visual: No valid filter values found for selection. Skipping filter application to avoid empty results.");
-            // We do NOT clear filter here to avoid resetting other visuals to 'All' when clicking empty space or invalid objects.
-            // If user wants to clear, they click empty space -> selectedDbIds.length === 0 handled above.
+                console.log(`Visual: Filter applied successfully! Power BI will now filter other visuals to show data for ${filterValues.length} selected element(s)`);
+
+                // Also update selection manager to ensure proper cross-visual interaction
+                try {
+                    // Build selection IDs for the filtered items to maintain selection state
+                    const selectionIds: ISelectionId[] = [];
+                    for (const extId of filterValues) {
+                        // Find the selection ID for this External ID
+                        this.elementDataMap.forEach((value, key) => {
+                            if (value.id === extId) {
+                                selectionIds.push(value.selectionId);
+                            }
+                        });
+                    }
+
+                    if (selectionIds.length > 0) {
+                        // Apply selection to maintain state consistency
+                        this.selectionManager.select(selectionIds, true); // true = multiSelect
+                    }
+                } catch (selectionError) {
+                    console.warn("Visual: Could not apply selection via SelectionManager:", selectionError);
+                }
+            } else {
+                console.warn("Visual: No valid External IDs found in dataset. Cannot apply filter.");
+            }
+        } finally {
+            // Always release the processing flag
+            this.isProcessingSelection = false;
         }
     }
 
     /**
-     * Build reverse mapping from dbId (number) to column value (string)
-     * Since the column contains dbId values directly, we map: dbId (number) -> dbId (string from column)
-     * This is critical for filtering: when user selects an element in viewer (dbId),
-     * we need to map it back to the exact string value in Power BI column
+     * Debounced version of handleSelectionChange to prevent rapid-fire calls
+     * Uses requestAnimationFrame + small timeout to ensure viewer has updated
+     * its selection state, especially important for Ctrl+Click multi-selection.
+     */
+    private handleSelectionChangeDebounced() {
+        // Clear any existing timer
+        if (this.selectionDebounceTimer !== null) {
+            clearTimeout(this.selectionDebounceTimer);
+        }
+
+        // Use requestAnimationFrame to wait for the next browser frame,
+        // then add a small delay to ensure viewer has updated selection state
+        // This is critical for Ctrl+Click where viewer needs to add element to selection array
+        requestAnimationFrame(() => {
+            this.selectionDebounceTimer = window.setTimeout(() => {
+                this.handleSelectionChange();
+                this.selectionDebounceTimer = null;
+            }, this.SELECTION_DEBOUNCE_MS);
+        });
+    }
+
+    /**
+     * Build reverse mapping from dbId (number) to External ID (string)
+     * CRITICAL: The Power BI column contains External IDs, not dbIds.
+     * This mapping allows us to quickly look up External IDs from dbIds.
+     * However, the primary method for filtering is getExternalIds() which is more reliable.
      */
     private async buildReverseMapping(): Promise<void> {
         if (!this.idMapping || !this.externalIds || this.externalIds.length === 0) {
@@ -562,33 +698,39 @@ export class Visual implements IVisual {
             return;
         }
 
-        console.log(`Visual: buildReverseMapping - Building reverse mapping for ${this.externalIds.length} dbId values from column`);
+        console.log(`Visual: buildReverseMapping - Building reverse mapping (dbId → ExternalId) for ${this.externalIds.length} ExternalIds from column`);
 
         try {
-            // Map all column values (which are dbIds as strings) to actual dbIds (numbers)
-            // This validates that the column values are valid dbIds in the model
-            const dbIds = await this.idMapping.smartMapToDbIds(this.externalIds);
+            // Step 1: Convert ExternalIds (from Power BI column) to dbIds
+            console.log("Visual: buildReverseMapping - Converting ExternalIds to dbIds...");
+            const dbIds = await this.idMapping.getDbids(this.externalIds);
+            console.log(`Visual: buildReverseMapping - Mapped ${dbIds.length} of ${this.externalIds.length} ExternalIds to dbIds`);
 
-            // Build reverse mapping: dbId (number) -> dbId (string from column)
-            // This allows us to map selected dbIds back to the exact string in the column
-            // Clear existing map to avoid stale data
+            const allDbIds = dbIds.filter(dbId => dbId != null && !isNaN(dbId));
+            if (allDbIds.length === 0) {
+                console.warn("Visual: buildReverseMapping - No valid dbIds found. Cannot build reverse mapping.");
+                return;
+            }
+
+            // Step 2: Build reverse mapping: dbId -> ExternalId using index alignment
             this.dbIdToColumnValueMap.clear();
 
-            for (let i = 0; i < this.externalIds.length; i++) {
-                const columnValue = this.externalIds[i]; // This is the dbId as string from Power BI column
-                if (i < dbIds.length && dbIds[i] != null) {
-                    // Map: dbId (number from viewer) -> dbId (string from column)
-                    this.dbIdToColumnValueMap.set(dbIds[i], columnValue);
+            for (let i = 0; i < allDbIds.length && i < this.externalIds.length; i++) {
+                const dbId = allDbIds[i];
+                const externalId = this.externalIds[i];
+                if (dbId != null && !isNaN(dbId) && externalId) {
+                    this.dbIdToColumnValueMap.set(dbId, externalId);
                 }
             }
 
             console.log(`Visual: buildReverseMapping - Built reverse mapping for ${this.dbIdToColumnValueMap.size} dbIds`);
             if (this.dbIdToColumnValueMap.size > 0) {
                 const sampleEntries = Array.from(this.dbIdToColumnValueMap.entries()).slice(0, 5);
-                console.log(`Visual: buildReverseMapping - Sample mappings:`, sampleEntries);
+                console.log(`Visual: buildReverseMapping - Sample mappings (dbId → ExternalId):`, sampleEntries);
             }
         } catch (e) {
             console.error("Visual: Error building reverse mapping", e);
+            console.error("Visual: Stack trace:", e.stack);
         }
     }
 
@@ -633,29 +775,25 @@ export class Visual implements IVisual {
                 console.log(`Visual: syncSelectionState - Input IDs (last 10):`, idsToIsolate.slice(-10));
                 console.log(`Visual: syncSelectionState - All input IDs:`, idsToIsolate);
 
-                // Use smart mapping that validates IDs exist in model
-                // These IDs come from Power BI column and should be dbId values as strings
-                const validDbIds = await this.idMapping.smartMapToDbIds(idsToIsolate);
+                // Map ExternalIds (from Power BI) to dbIds for viewer operations
+                const validDbIds = await this.idMapping.getDbids(idsToIsolate);
 
-                console.log(`Visual: syncSelectionState - Mapping result: ${validDbIds.length} valid DbIds from ${idsToIsolate.length} input IDs`);
+                console.log(`Visual: syncSelectionState - Mapping result: ${validDbIds.length} valid DbIds from ${idsToIsolate.length} input External IDs`);
 
-                // CRITICAL: Build a proper mapping from column values to dbIds
-                // Since smartMapToDbIds may not preserve order or may skip invalid IDs,
-                // we need to map each column value to its corresponding dbId
-                const columnValueToDbIdMap = new Map<string, number>();
-                for (let i = 0; i < idsToIsolate.length; i++) {
-                    const columnValue = idsToIsolate[i];
-                    // Try to find the corresponding dbId
-                    // Since we're using direct dbId mapping, the column value should be the dbId as string
-                    const parsedDbId = parseInt(columnValue, 10);
-                    if (!isNaN(parsedDbId) && validDbIds.includes(parsedDbId)) {
-                        columnValueToDbIdMap.set(columnValue, parsedDbId);
-                        // Also update reverse mapping
-                        this.dbIdToColumnValueMap.set(parsedDbId, columnValue);
+                // Update reverse mapping: dbId → External ID (for potential future use)
+                // This is a best-effort update to keep the cache fresh
+                // Note: The primary method for filtering (Viewer → Power BI) uses getExternalIds() directly in handleDbIds()
+                try {
+                    const externalIdsForDbIds = await this.idMapping.getExternalIds(validDbIds);
+                    for (let i = 0; i < validDbIds.length; i++) {
+                        if (i < externalIdsForDbIds.length && externalIdsForDbIds[i]) {
+                            this.dbIdToColumnValueMap.set(validDbIds[i], externalIdsForDbIds[i]);
+                        }
                     }
+                    console.log(`Visual: syncSelectionState - Updated reverse mapping for ${validDbIds.length} dbIds`);
+                } catch (e) {
+                    console.warn("Visual: syncSelectionState - Could not update reverse mapping:", e);
                 }
-
-                console.log(`Visual: syncSelectionState - Built column value to dbId mapping: ${columnValueToDbIdMap.size} entries`);
 
                 console.log(`Visual: syncSelectionState - Mapped ${idsToIsolate.length} IDs to ${validDbIds.length} valid DbIds`);
 
@@ -836,8 +974,8 @@ export class Visual implements IVisual {
         for (const colorHex in colorMap) {
             const ids = colorMap[colorHex];
             try {
-                // Use smart mapping to get valid DbIds
-                const validDbIds = await this.idMapping.smartMapToDbIds(ids);
+                // Map ExternalIds (from Power BI) to dbIds for theming
+                const validDbIds = await this.idMapping.getDbids(ids);
 
                 if (validDbIds.length > 0) {
                     const vec = this.hexToVector4(colorHex);
@@ -875,8 +1013,8 @@ export class Visual implements IVisual {
         for (const colorHex in colorMap) {
             const ids = colorMap[colorHex];
             try {
-                // Use smart mapping to get valid DbIds
-                const validDbIds = await this.idMapping.smartMapToDbIds(ids);
+                // Map ExternalIds (from Power BI) to dbIds for theming
+                const validDbIds = await this.idMapping.getDbids(ids);
 
                 if (validDbIds.length > 0) {
                     const vec = this.hexToVector4(colorHex);

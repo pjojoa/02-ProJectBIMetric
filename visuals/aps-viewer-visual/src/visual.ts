@@ -458,7 +458,18 @@ export class Visual implements IVisual {
                 this.currentUrn,
                 token.access_token,
                 this.currentGuid,
-                () => this.handleSelectionChangeDebounced(), // Debounced callback for selection
+                (ids) => {
+                    // Debounce logic:
+                    // When selection changes, wait 150ms (reduced for better fluidity).
+                    // If another change happens, reset timer.
+                    if (this.selectionDebounceTimer) {
+                        clearTimeout(this.selectionDebounceTimer);
+                    }
+                    this.selectionDebounceTimer = setTimeout(() => {
+                        this.handleSelectionChange();
+                        this.selectionDebounceTimer = null;
+                    }, 150);
+                },
                 profile, // Pass performance profile
                 env, // Pass environment
                 api // Pass API
@@ -502,162 +513,171 @@ export class Visual implements IVisual {
      * Uses the new ExternalID-first pattern.
      * Now with debouncing and concurrent call prevention for better responsiveness.
      */
+    // Flag to track if we need to run another update after the current one finishes
+    private isUpdatePending: boolean = false;
+
     private async handleSelectionChange() {
         if (!this.host || !this.viewer || !this.idMapping) return;
 
         // Skip if this selection change came from programmatic selection (external filter)
         if (this.isProgrammaticSelection) {
-            // console.log("Visual: Ignoring programmatic selection change");
             return;
         }
 
-        // Prevent concurrent processing
+        // Concurrency Management:
+        // If already processing, mark that we need another update (because selection has changed again)
+        // and return. The running process will pick this up when it finishes.
         if (this.isProcessingSelection) {
-            console.log("Visual: Selection change already being processed, skipping...");
+            console.log("Visual: Selection change already running, queuing next update...");
+            this.isUpdatePending = true;
             return;
         }
 
         this.isProcessingSelection = true;
+        this.isUpdatePending = false; // Clear pending flag as we are starting now
 
         try {
-            // 1. Get current selection from viewer - this should include ALL selected elements
-            // The viewer maintains all selected elements when using Ctrl+Click
-            const currentDbIds = this.viewer.getSelection();
-            console.log(`Visual: Raw selection from viewer: ${currentDbIds.length} dbIds`, currentDbIds.slice(0, 10), currentDbIds.length > 10 ? `... and ${currentDbIds.length - 10} more` : '');
-
-            // 2. Convert dbIds to ExternalIDs
-            const selectedExternalIds = await getSelectionAsExternalIds(this.viewer, this.idMapping);
-
-            if (selectedExternalIds.length > 1) {
-                console.log(`Visual: Multi-selection detected! Selected ${selectedExternalIds.length} elements. ExternalIDs:`, selectedExternalIds.slice(0, 10), selectedExternalIds.length > 10 ? `... and ${selectedExternalIds.length - 10} more` : '');
-            } else if (selectedExternalIds.length === 1) {
-                console.log(`Visual: Single selection. ExternalID: ${selectedExternalIds[0]}`);
-            } else {
-                console.log(`Visual: Selection cleared (no elements selected)`);
-            }
-
-            // Debug: Check if dbIds count matches ExternalIds count
-            if (currentDbIds.length !== selectedExternalIds.length) {
-                console.warn(`Visual: Selection count mismatch! dbIds: ${currentDbIds.length}, ExternalIds: ${selectedExternalIds.length}`);
-            }
-
-            // 2. If no selection, clear filters
-            if (selectedExternalIds.length === 0) {
-                console.log("Visual: No selection - clearing all filters");
-                this.host.applyJsonFilter(null, "general", "filter", powerbi.FilterAction.merge);
-                this.isDbIdSelectionActive = false;
-
-                // Also clear selection in SelectionManager
-                try {
-                    this.selectionManager.clear();
-                } catch (clearError) {
-                    console.warn("Visual: Could not clear selection via SelectionManager:", clearError);
+            // Start the processing loop
+            // We loop as long as isUpdatePending becomes true during our execution
+            do {
+                // If we are looping back, it means a new selection happened while we were working.
+                // We clear the flag and process the *latest* state.
+                if (this.isUpdatePending) {
+                    console.log("Visual: Processing queued selection update...");
+                    this.isUpdatePending = false;
                 }
-                return;
-            }
 
-            // 3. Validate that we have the necessary components
-            if (!this.currentDataView || !this.currentDataView.table) {
-                console.warn("Visual: No data view available for filtering");
-                return;
-            }
+                // 1. Get current selection from viewer - this should include ALL selected elements
+                // The viewer maintains all selected elements when using Ctrl+Click
+                const currentDbIds = this.viewer.getSelection();
+                console.log(`Visual: Raw selection from viewer: ${currentDbIds.length} dbIds`, currentDbIds.slice(0, 10), currentDbIds.length > 10 ? `... and ${currentDbIds.length - 10} more` : '');
 
-            const columns = this.currentDataView.table.columns;
-            const externalIdsIndex = columns.findIndex(c => c.roles["externalIds"]);
+                // 2. Convert dbIds to ExternalIDs
+                const selectedExternalIds = await getSelectionAsExternalIds(this.viewer, this.idMapping);
 
-            if (externalIdsIndex === -1) {
-                console.warn("Visual: 'externalIds' role column not found");
-                return;
-            }
+                if (selectedExternalIds.length > 1) {
+                    console.log(`Visual: Multi-selection detected! Selected ${selectedExternalIds.length} elements. ExternalIDs:`, selectedExternalIds.slice(0, 10), selectedExternalIds.length > 10 ? `... and ${selectedExternalIds.length - 10} more` : '');
+                } else if (selectedExternalIds.length === 1) {
+                    console.log(`Visual: Single selection. ExternalID: ${selectedExternalIds[0]}`);
+                } else {
+                    console.log(`Visual: Selection cleared (no elements selected)`);
+                }
 
-            const columnSource = columns[externalIdsIndex];
+                // Debug: Check if dbIds count matches ExternalIds count
+                if (currentDbIds.length !== selectedExternalIds.length) {
+                    console.warn(`Visual: Selection count mismatch! dbIds: ${currentDbIds.length}, ExternalIds: ${selectedExternalIds.length}`);
+                }
 
-            // 4. Get table and column names for filter target
-            let target: models.IFilterColumnTarget;
+                // 2. If no selection, clear filters
+                if (selectedExternalIds.length === 0) {
+                    console.log("Visual: No selection - clearing all filters");
+                    this.host.applyJsonFilter(null, "general", "filter", powerbi.FilterAction.merge);
+                    this.isDbIdSelectionActive = false;
 
-            if (columnSource.queryName) {
-                const parts = columnSource.queryName.split('.');
-                if (parts.length >= 2) {
-                    target = {
-                        table: parts[0],
-                        column: parts[1]
-                    };
+                    // Also clear selection in SelectionManager
+                    try {
+                        this.selectionManager.clear();
+                    } catch (clearError) {
+                        console.warn("Visual: Could not clear selection via SelectionManager:", clearError);
+                    }
+                    return;
+                }
+
+                // 3. Validate that we have the necessary components
+                if (!this.currentDataView || !this.currentDataView.table) {
+                    console.warn("Visual: No data view available for filtering");
+                    return;
+                }
+
+                const columns = this.currentDataView.table.columns;
+                const externalIdsIndex = columns.findIndex(c => c.roles["externalIds"]);
+
+                if (externalIdsIndex === -1) {
+                    console.warn("Visual: 'externalIds' role column not found");
+                    return;
+                }
+
+                const columnSource = columns[externalIdsIndex];
+
+                // 4. Get table and column names for filter target
+                let target: models.IFilterColumnTarget;
+
+                if (columnSource.queryName) {
+                    const parts = columnSource.queryName.split('.');
+                    if (parts.length >= 2) {
+                        target = {
+                            table: parts[0],
+                            column: parts[1]
+                        };
+                    } else {
+                        target = {
+                            table: columnSource.queryName,
+                            column: columnSource.displayName
+                        };
+                    }
                 } else {
                     target = {
-                        table: columnSource.queryName,
+                        table: "Data",
                         column: columnSource.displayName
                     };
                 }
-            } else {
-                target = {
-                    table: "Data",
-                    column: columnSource.displayName
-                };
-            }
 
-            // 5. Verify that External IDs exist in our known dataset
-            // This ensures we only filter with IDs that exist in Power BI data
-            const filterValues: string[] = [];
-            const unknownExternalIds: string[] = [];
 
-            for (const extId of selectedExternalIds) {
-                // Check if this External ID exists in our dataset
-                if (this.externalIds.includes(extId)) {
-                    filterValues.push(extId);
-                } else {
-                    unknownExternalIds.push(extId);
-                }
-            }
+                // 5. Apply filter directly with ALL selected External IDs
+                // We trust the Viewer: if an object is selected, we want to filter by it.
+                // Power BI will handle the matching against its data model.
+                // We do NOT validate against this.externalIds because that array might be incomplete
+                // (pagination in progress or limits reached).
+                const filterValues = selectedExternalIds;
 
-            if (unknownExternalIds.length > 0) {
-                // console.warn(`Visual: ${unknownExternalIds.length} Unknown External IDs (not in dataset). Sample:`, unknownExternalIds.slice(0, 5));
-            }
-
-            // 6. Apply filter if we have valid values
-            if (filterValues.length > 0) {
-                if (filterValues.length > 1) {
-                    console.log(`Visual: Applying multi-selection filter with ${filterValues.length} External IDs`);
-                    console.log(`Visual: Filter will show data for ${filterValues.length} selected elements`);
-                } else {
-                    console.log(`Visual: Applying filter with 1 External ID: ${filterValues[0]}`);
-                }
-
-                const filter = new models.BasicFilter(
-                    target,
-                    "In",
-                    filterValues
-                );
-
-                // CRITICAL: Use FilterAction.merge to allow cross-filtering with other visuals
-                // This filter will show rows where the External ID column matches ANY of the selected IDs
-                this.host.applyJsonFilter(filter, "general", "filter", powerbi.FilterAction.merge);
-                this.isDbIdSelectionActive = true;
-
-                console.log(`Visual: Filter applied successfully! Power BI will now filter other visuals to show data for ${filterValues.length} selected element(s)`);
-
-                // Also update selection manager to ensure proper cross-visual interaction
-                try {
-                    // Build selection IDs for the filtered items to maintain selection state
-                    const selectionIds: ISelectionId[] = [];
-                    for (const extId of filterValues) {
-                        // Find the selection ID for this External ID
-                        this.elementDataMap.forEach((value, key) => {
-                            if (value.id === extId) {
-                                selectionIds.push(value.selectionId);
-                            }
-                        });
+                // 6. Apply filter if we have valid values
+                if (filterValues.length > 0) {
+                    if (filterValues.length > 1) {
+                        console.log(`Visual: Applying multi-selection filter with ${filterValues.length} External IDs`);
+                    } else {
+                        console.log(`Visual: Applying filter with 1 External ID: ${filterValues[0]}`);
                     }
 
-                    if (selectionIds.length > 0) {
-                        // Apply selection to maintain state consistency
-                        this.selectionManager.select(selectionIds, true); // true = multiSelect
+                    const filter = new models.BasicFilter(
+                        target,
+                        "In",
+                        filterValues
+                    );
+
+                    // CRITICAL: Use FilterAction.merge to allow cross-filtering with other visuals
+                    // This filter will show rows where the External ID column matches ANY of the selected IDs
+                    this.host.applyJsonFilter(filter, "general", "filter", powerbi.FilterAction.merge);
+                    this.isDbIdSelectionActive = true;
+
+                    console.log(`Visual: Filter applied successfully! Power BI will now filter other visuals to show data for ${filterValues.length} selected element(s)`);
+
+                    // Also update selection manager to ensure proper cross-visual interaction
+                    try {
+                        // Build selection IDs for the filtered items to maintain selection state
+                        const selectionIds: ISelectionId[] = [];
+                        for (const extId of filterValues) {
+                            // Find the selection ID for this External ID
+                            this.elementDataMap.forEach((value, key) => {
+                                if (value.id === extId) {
+                                    selectionIds.push(value.selectionId);
+                                }
+                            });
+                        }
+
+                        if (selectionIds.length > 0) {
+                            // Apply selection to maintain state consistency
+                            this.selectionManager.select(selectionIds, false); // false = replace (sync with absolute viewer state)
+                        }
+                    } catch (selectionError) {
+                        console.warn("Visual: Could not apply selection via SelectionManager:", selectionError);
                     }
-                } catch (selectionError) {
-                    console.warn("Visual: Could not apply selection via SelectionManager:", selectionError);
+                } else {
+                    console.warn("Visual: No valid External IDs found in dataset. Cannot apply filter.");
                 }
-            } else {
-                console.warn("Visual: No valid External IDs found in dataset. Cannot apply filter.");
-            }
+            } while (this.isUpdatePending);
+
+        } catch (error) {
+            console.error("Visual: Error processing selection change", error);
         } finally {
             // Always release the processing flag
             this.isProcessingSelection = false;

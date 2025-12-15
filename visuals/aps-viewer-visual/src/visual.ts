@@ -145,7 +145,11 @@ export class Visual implements IVisual {
      */
     // eslint-disable-next-line max-lines-per-function
     public async update(options: VisualUpdateOptions): Promise<void> {
+        // IMPORTANTE: Populate settings ANTES de procesar datos para capturar cambios del usuario
         this.formattingSettings = this.formattingSettingsService.populateFormattingSettingsModel(VisualSettingsModel, options.dataViews[0]);
+        
+        // Guardar estado anterior de categoryColorMap para detectar cambios
+        const previousCategoryColorMap = new Map(this.categoryColorMap);
         // Access Token Endpoint: usar valor de settings si está disponible, sino usar valor por defecto
         const { accessTokenEndpoint } = this.formattingSettings.viewerCard;
         const endpointValue = accessTokenEndpoint?.value || 'https://zero2-projectbimetric.onrender.com/token';
@@ -244,41 +248,40 @@ export class Visual implements IVisual {
         // 1. Identify unique categories from the 'color' column
         // We only do this if a color column is mapped
         if (colorIndex !== -1) {
-            // 1. Identify unique categories and find the BEST row to use for settings (one that already has settings saved)
-            // Map: Category Value -> { rowIndex, savedColor }
+            // 1. Identify unique categories and find the BEST row to use for settings
+            // Estrategia mejorada: buscar TODAS las filas de cada categoría para encontrar colores guardados
+            // Map: Category Value -> { rowIndex (primera fila encontrada), savedColor (de cualquier fila de esa categoría) }
             const categoryMetaMap = new Map<string, { rowIndex: number, savedColor: string | null }>();
 
+            // Primera pasada: identificar todas las categorías únicas y encontrar colores guardados
             dataView.table.rows.forEach((row, rowIndex) => {
                 const colorValue = String(row[colorIndex]).trim();
-                // Skip invalid, but proceed if valid
                 if (!colorValue) return;
 
                 const objects = row.objects;
-                let hasSettings = false;
                 let sColor: string | null = null;
 
                 if (objects && objects['dataPoint']) {
                     const dp = objects['dataPoint'] as any;
-                    // Debug Log
-                    console.log(`Visual: Found settings for category '${colorValue}' at row ${rowIndex}:`, dp);
-
                     if (dp.fill && dp.fill.solid && dp.fill.solid.color) {
                         sColor = dp.fill.solid.color;
-                        hasSettings = true;
+                        console.log(`Visual: Found saved color for category '${colorValue}' at row ${rowIndex}: ${sColor}`);
                     }
                 }
 
-                // Logic: 
-                // 1. If we don't have this category yet, add it.
-                // 2. If we DO have it, but the current row HAS settings and the stored one DIDN'T, update it.
-                // 3. If both have settings, we just overwrite (last wins) or keep first? Power BI usually applies to all if selector matches.
-                //    But since we are using specific row selectors, picking one with settings is crucial.
+                // Si ya tenemos esta categoría, actualizar el color guardado si encontramos uno
                 const existing = categoryMetaMap.get(colorValue);
-                if (!existing || hasSettings) {
-                    if (hasSettings) console.log(`Visual: Updating metadata for '${colorValue}' with settings from row ${rowIndex}`);
+                if (existing) {
+                    // Si encontramos un color guardado y no teníamos uno antes, actualizar
+                    if (sColor && !existing.savedColor) {
+                        existing.savedColor = sColor;
+                        console.log(`Visual: Updated saved color for '${colorValue}' from row ${rowIndex}: ${sColor}`);
+                    }
+                } else {
+                    // Primera vez que vemos esta categoría: guardar rowIndex y color (si existe)
                     categoryMetaMap.set(colorValue, {
                         rowIndex: rowIndex,
-                        savedColor: sColor // WARNING: If sColor is null here (porque se quitó el fill), perdemos el color hasta que el usuario vuelva a asignarlo
+                        savedColor: sColor
                     });
                 }
             });
@@ -287,28 +290,32 @@ export class Visual implements IVisual {
             this.formattingSettings.dataPointCard.slices = [];
             this.categoryColorMap.clear();
 
-            // Estrategia de color:
-            // - Siempre hay un color activo por categoría (paleta por defecto).
-            // - Si el usuario elige un color en el panel de formato, ese color
-            //   sobrescribe el color por defecto y se mantiene al cambiar de página.
+            // Estrategia de color mejorada:
+            // - Colores por defecto consistentes usando hash de la categoría (mismo nombre = mismo color)
+            // - Si el usuario elige un color, ese color se guarda y persiste al cambiar de página
             const defaultColors = ['#01B8AA', '#374649', '#FD625E', '#F2C80F', '#5F6B6D', '#8AD4EB', '#FE9666', '#A66999'];
-            let colorIdx = 0;
+            
+            // Función para obtener un color por defecto consistente basado en el nombre de la categoría
+            const getDefaultColorForCategory = (category: string): string => {
+                // Usar un hash simple del nombre para obtener siempre el mismo color por defecto
+                let hash = 0;
+                for (let i = 0; i < category.length; i++) {
+                    hash = ((hash << 5) - hash) + category.charCodeAt(i);
+                    hash = hash & hash; // Convert to 32bit integer
+                }
+                const index = Math.abs(hash) % defaultColors.length;
+                return defaultColors[index];
+            };
 
             categoryMetaMap.forEach((meta, category) => {
                 const hasUserColor = !!meta.savedColor;
 
                 // Color final que usaremos tanto en la UI como en el visor:
-                // - Si el usuario definió un color, usamos ese.
-                // - Si no, usamos la paleta por defecto (estable pero sencilla).
+                // - Si el usuario definió un color, usamos ese (prioridad absoluta).
+                // - Si no, usamos un color por defecto CONSISTENTE basado en el nombre de la categoría.
                 const finalColor = hasUserColor
                     ? (meta.savedColor as string)
-                    : defaultColors[colorIdx % defaultColors.length];
-
-                // Avanzar en la paleta sólo cuando usamos un color por defecto,
-                // para que cada categoría tenga un color distinto inicial.
-                if (!hasUserColor) {
-                    colorIdx++;
-                }
+                    : getDefaultColorForCategory(category);
 
                 // DETAILED LOGGING
                 console.log(`Visual: Processing category '${category}':`, {

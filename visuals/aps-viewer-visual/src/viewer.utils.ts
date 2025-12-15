@@ -568,7 +568,8 @@ export function applyPerformanceProfile(viewer: Autodesk.Viewing.GuiViewer3D, pr
         }
         
         // Disable expensive features
-        viewer.setBackgroundColor(0x000000, 0x000000, 0x000000); // Solid black background (faster)
+        // Set solid black background for better performance (6 arguments: top, bottom, top2, bottom2, top3, bottom3)
+        viewer.setBackgroundColor(0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000);
         
         // Reduce texture quality for faster loading and rendering
         if ((viewer as any).setTextureQuality) {

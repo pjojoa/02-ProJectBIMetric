@@ -287,37 +287,40 @@ export class Visual implements IVisual {
             this.formattingSettings.dataPointCard.slices = [];
             this.categoryColorMap.clear();
 
-            // IMPORTANT:
-            // Ya NO generamos colores por defecto. El usuario debe elegir explícitamente
-            // el color de cada categoría en el panel de formato ("Data Colors").
-            //
-            // Reglas:
-            // - Si la categoría tiene un color guardado (meta.savedColor), lo usamos SIEMPRE.
-            // - Ya NO existe un switch por categoría. El usuario sólo elige el color.
-            // - Si NO tiene color guardado, no aplicamos color en el visor hasta que
-            //   el usuario seleccione uno manualmente.
+            // Estrategia de color:
+            // - Siempre hay un color activo por categoría (paleta por defecto).
+            // - Si el usuario elige un color en el panel de formato, ese color
+            //   sobrescribe el color por defecto y se mantiene al cambiar de página.
+            const defaultColors = ['#01B8AA', '#374649', '#FD625E', '#F2C80F', '#5F6B6D', '#8AD4EB', '#FE9666', '#A66999'];
+            let colorIdx = 0;
 
             categoryMetaMap.forEach((meta, category) => {
                 const hasUserColor = !!meta.savedColor;
 
-                // finalColorForUi: color mostrado en el ColorPicker. Si no hay color,
-                // usamos un placeholder neutro sólo para la UI; el visor NO lo usa
-                // hasta que el usuario elija y guarde un color real.
-                const finalColorForUi = meta.savedColor || '#01B8AA'; // Placeholder visual
+                // Color final que usaremos tanto en la UI como en el visor:
+                // - Si el usuario definió un color, usamos ese.
+                // - Si no, usamos la paleta por defecto (estable pero sencilla).
+                const finalColor = hasUserColor
+                    ? (meta.savedColor as string)
+                    : defaultColors[colorIdx % defaultColors.length];
+
+                // Avanzar en la paleta sólo cuando usamos un color por defecto,
+                // para que cada categoría tenga un color distinto inicial.
+                if (!hasUserColor) {
+                    colorIdx++;
+                }
 
                 // DETAILED LOGGING
                 console.log(`Visual: Processing category '${category}':`, {
                     rowIndex: meta.rowIndex,
                     savedColor: meta.savedColor,
-                    finalColorForUi: finalColorForUi,
+                    finalColor: finalColor,
                     hasUserColor: hasUserColor
                 });
 
-                // Update Map for Viewer (SIEMPRE que haya color elegido por el usuario)
-                if (hasUserColor) {
-                    this.categoryColorMap.set(category, meta.savedColor as string);
-                    console.log(`Visual: Added '${category}' to categoryColorMap with user-selected color ${meta.savedColor}`);
-                }
+                // Actualizar Map para el visor SIEMPRE (siempre habrá un color final)
+                this.categoryColorMap.set(category, finalColor);
+                console.log(`Visual: Added '${category}' to categoryColorMap with color ${finalColor}`);
 
                 // Create Selector tied to the specific row
                 const selectionIdBuilder = this.host.createSelectionIdBuilder();
@@ -325,15 +328,15 @@ export class Visual implements IVisual {
                 const selectionId = selectionIdBuilder.createSelectionId();
 
                 // Create Slices
-                // ÚNICO control: Color Picker "[Category]" - el usuario elige el color
+                // ÚNICO control: Color Picker "[Category]" - el usuario puede sobrescribir el color
                 const colorSlice = new ColorPicker({
                     name: "fill",
                     displayName: `${category} Color`,
-                    value: { value: finalColorForUi },
+                    value: { value: finalColor },
                     selector: selectionId.getSelector()
                 });
 
-                console.log(`Visual: Created slices for '${category}' - Color value: ${finalColorForUi}`);
+                console.log(`Visual: Created slices for '${category}' - Color value: ${finalColor}`);
 
                 this.formattingSettings.dataPointCard.slices.push(colorSlice);
             });

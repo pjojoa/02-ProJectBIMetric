@@ -245,8 +245,8 @@ export class Visual implements IVisual {
         // We only do this if a color column is mapped
         if (colorIndex !== -1) {
             // 1. Identify unique categories and find the BEST row to use for settings (one that already has settings saved)
-            // Map: Category Value -> { rowIndex, savedColor, savedShow }
-            const categoryMetaMap = new Map<string, { rowIndex: number, savedColor: string | null, savedShow: boolean | null }>();
+            // Map: Category Value -> { rowIndex, savedColor }
+            const categoryMetaMap = new Map<string, { rowIndex: number, savedColor: string | null }>();
 
             dataView.table.rows.forEach((row, rowIndex) => {
                 const colorValue = String(row[colorIndex]).trim();
@@ -256,7 +256,6 @@ export class Visual implements IVisual {
                 const objects = row.objects;
                 let hasSettings = false;
                 let sColor: string | null = null;
-                let sShow: boolean | null = null;
 
                 if (objects && objects['dataPoint']) {
                     const dp = objects['dataPoint'] as any;
@@ -265,10 +264,6 @@ export class Visual implements IVisual {
 
                     if (dp.fill && dp.fill.solid && dp.fill.solid.color) {
                         sColor = dp.fill.solid.color;
-                        hasSettings = true;
-                    }
-                    if (dp.showColor !== undefined) {
-                        sShow = dp.showColor;
                         hasSettings = true;
                     }
                 }
@@ -283,8 +278,7 @@ export class Visual implements IVisual {
                     if (hasSettings) console.log(`Visual: Updating metadata for '${colorValue}' with settings from row ${rowIndex}`);
                     categoryMetaMap.set(colorValue, {
                         rowIndex: rowIndex,
-                        savedColor: sColor, // WARNING: If sColor is null here (because fill was removed), we might lose color?
-                        savedShow: sShow
+                        savedColor: sColor // WARNING: If sColor is null here (porque se quitó el fill), perdemos el color hasta que el usuario vuelva a asignarlo
                     });
                 }
             });
@@ -298,33 +292,29 @@ export class Visual implements IVisual {
             // el color de cada categoría en el panel de formato ("Data Colors").
             //
             // Reglas:
-            // - Si la categoría tiene un color guardado (meta.savedColor), lo usamos.
+            // - Si la categoría tiene un color guardado (meta.savedColor), lo usamos SIEMPRE.
+            // - Ya NO existe un switch por categoría. El usuario sólo elige el color.
             // - Si NO tiene color guardado, no aplicamos color en el visor hasta que
             //   el usuario seleccione uno manualmente.
 
             categoryMetaMap.forEach((meta, category) => {
                 const hasUserColor = !!meta.savedColor;
 
-                // Determine final values for UI:
-                // - isShow: por defecto TRUE sólo si ya existe un color del usuario.
-                // - finalColorForUi: color mostrado en el ColorPicker. Si no hay color,
-                //   usamos un placeholder neutro sólo para la UI; el visor no lo usa
-                //   hasta que el usuario confirme un color.
-                const isShow = meta.savedShow !== null ? meta.savedShow : hasUserColor;
+                // finalColorForUi: color mostrado en el ColorPicker. Si no hay color,
+                // usamos un placeholder neutro sólo para la UI; el visor NO lo usa
+                // hasta que el usuario elija y guarde un color real.
                 const finalColorForUi = meta.savedColor || '#01B8AA'; // Placeholder visual
 
                 // DETAILED LOGGING
                 console.log(`Visual: Processing category '${category}':`, {
                     rowIndex: meta.rowIndex,
                     savedColor: meta.savedColor,
-                    savedShow: meta.savedShow,
                     finalColorForUi: finalColorForUi,
-                    isShow: isShow,
                     hasUserColor: hasUserColor
                 });
 
-                // Update Map for Viewer (ONLY if Enable is TRUE AND hay color elegido por el usuario)
-                if (isShow && hasUserColor) {
+                // Update Map for Viewer (SIEMPRE que haya color elegido por el usuario)
+                if (hasUserColor) {
                     this.categoryColorMap.set(category, meta.savedColor as string);
                     console.log(`Visual: Added '${category}' to categoryColorMap with user-selected color ${meta.savedColor}`);
                 }
@@ -335,15 +325,7 @@ export class Visual implements IVisual {
                 const selectionId = selectionIdBuilder.createSelectionId();
 
                 // Create Slices
-                // 1. Toggle "Enable [Category]"
-                const toggleSlice = new ToggleSwitch({
-                    name: "showColor",
-                    displayName: `Enable ${category}`,
-                    value: isShow,
-                    selector: selectionId.getSelector()
-                });
-
-                // 2. Color Picker "[Category]" - el usuario elige el color
+                // ÚNICO control: Color Picker "[Category]" - el usuario elige el color
                 const colorSlice = new ColorPicker({
                     name: "fill",
                     displayName: `${category} Color`,
@@ -351,9 +333,8 @@ export class Visual implements IVisual {
                     selector: selectionId.getSelector()
                 });
 
-                console.log(`Visual: Created slices for '${category}' - Toggle value: ${isShow}, Color value: ${finalColorForUi}`);
+                console.log(`Visual: Created slices for '${category}' - Color value: ${finalColorForUi}`);
 
-                this.formattingSettings.dataPointCard.slices.push(toggleSlice);
                 this.formattingSettings.dataPointCard.slices.push(colorSlice);
             });
 

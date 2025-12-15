@@ -269,14 +269,16 @@ export class Visual implements IVisual {
                     }
                 }
 
-                // Si ya tenemos esta categoría, actualizar el color guardado si encontramos uno
+                // Si ya tenemos esta categoría, actualizar el color guardado SIEMPRE que encontremos uno
+                // (el usuario puede haber cambiado el color, así que debemos usar el más reciente)
                 const existing = categoryMetaMap.get(colorValue);
                 if (existing) {
-                    // Si encontramos un color guardado y no teníamos uno antes, actualizar
-                    if (sColor && !existing.savedColor) {
+                    // Si encontramos un color guardado, usarlo (puede ser nuevo o actualizado)
+                    if (sColor) {
                         existing.savedColor = sColor;
                         console.log(`Visual: Updated saved color for '${colorValue}' from row ${rowIndex}: ${sColor}`);
                     }
+                    // Si no encontramos color en esta fila pero ya teníamos uno guardado, mantenerlo
                 } else {
                     // Primera vez que vemos esta categoría: guardar rowIndex y color (si existe)
                     categoryMetaMap.set(colorValue, {
@@ -347,6 +349,28 @@ export class Visual implements IVisual {
 
                 this.formattingSettings.dataPointCard.slices.push(colorSlice);
             });
+            
+            // Detectar cambios en los colores y forzar actualización del visor si es necesario
+            let colorsChanged = false;
+            if (previousCategoryColorMap.size !== this.categoryColorMap.size) {
+                colorsChanged = true;
+                console.log(`Visual: Category count changed: ${previousCategoryColorMap.size} -> ${this.categoryColorMap.size}`);
+            } else {
+                for (const [category, color] of this.categoryColorMap) {
+                    const previousColor = previousCategoryColorMap.get(category);
+                    if (previousColor !== color) {
+                        colorsChanged = true;
+                        console.log(`Visual: Color changed for category '${category}': ${previousColor || 'none'} -> ${color}`);
+                        break;
+                    }
+                }
+            }
+            
+            // Si los colores cambiaron y el botón global está activo, actualizar inmediatamente
+            if (colorsChanged && this.isGlobalColoringEnabled && this.viewer && this.model && this.idMapping) {
+                console.log('Visual: Colors changed, forcing immediate syncColors() update');
+                void this.syncColors();
+            }
 
         }
 

@@ -52,7 +52,16 @@ class ViewerCard extends Card {
     slices: Array<Slice> = [this.accessTokenEndpoint, this.viewerEnv, this.viewerRegion, this.performanceProfile];
 }
 
+export class DataPointCard extends Card {
+    name: string = "dataPoint";
+    displayName: string = "Data Colors";
+
+    // Slices will be populated dynamically in visual.ts
+    slices: Array<Slice> = [];
+}
+
 export class VisualSettingsModel extends Model {
     viewerCard = new ViewerCard();
-    cards = [this.viewerCard];
+    dataPointCard = new DataPointCard();
+    cards = [this.viewerCard, this.dataPointCard];
 }

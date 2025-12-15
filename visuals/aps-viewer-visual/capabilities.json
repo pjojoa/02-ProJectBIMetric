@@ -11,11 +11,6 @@
             "kind": "Grouping"
         },
         {
-            "displayName": "Vista",
-            "name": "guid",
-            "kind": "Grouping"
-        },
-        {
             "displayName": "Color",
             "name": "color",
             "kind": "Grouping"
@@ -34,11 +29,6 @@
                         {
                             "for": {
                                 "in": "externalIds"
-                            }
-                        },
-                        {
-                            "for": {
-                                "in": "guid"
                             }
                         },
                         {
@@ -62,6 +52,27 @@
                 "accessTokenEndpoint": {
                     "type": {
                         "text": true
+                    }
+                }
+            }
+        },
+        "dataPoint": {
+            "displayName": "Data Colors",
+            "properties": {
+                "fill": {
+                    "displayName": "Fill",
+                    "type": {
+                        "fill": {
+                            "solid": {
+                                "color": true
+                            }
+                        }
+                    }
+                },
+                "showColor": {
+                    "displayName": "Show Color",
+                    "type": {
+                        "bool": true
                     }
                 }
             }

@@ -1,5 +1,6 @@
 /// <reference types="@types/forge-viewer" />
 
+// eslint-disable-next-line max-lines-per-function
 export function registerGhostingExtension() {
     if (typeof Autodesk === 'undefined' || !Autodesk.Viewing) return;
 
@@ -76,6 +77,7 @@ export function registerGhostingExtension() {
             this.button.icon.style.height = '28px';
         }
 
+        // eslint-disable-next-line @typescript-eslint/no-this-alias
         const self = this;
         this.button.onClick = function () {
             const current = self.viewer.prefs.get(Autodesk.Viewing.Private.Prefs3D.GHOSTING);

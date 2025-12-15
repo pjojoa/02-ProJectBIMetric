@@ -425,7 +425,8 @@ export async function launchViewer(
     onDbIdsChanged: (ids: number[]) => void,
     performanceProfile: 'HighPerformance' | 'Balanced' = 'HighPerformance',
     env: string = 'AutodeskProduction2',
-    api: string = 'streamingV2'
+    api: string = 'streamingV2',
+    onViewerStarted?: () => void
 ): Promise<{ viewer: Autodesk.Viewing.Viewer3D, model: Autodesk.Viewing.Model }> {
 
     // Initialize runtime if not already (Singleton)
@@ -450,15 +451,46 @@ export async function launchViewer(
             modelBrowser: false, // Enable Model Browser
             propertiesPanel: false,
             layerManager: true,
-            hyperlink: true
+            hyperlink: true,
+            // Disable MixpanelExtension to prevent localStorage errors in Power BI sandbox
+            MixpanelExtension: true
         }
     };
 
     const viewer = new Autodesk.Viewing.GuiViewer3D(container, config as Autodesk.Viewing.ViewerConfig);
+    
+    // Suppress MixpanelExtension errors by preventing its registration
+    // This extension tries to use localStorage which is not available in Power BI sandbox
+    const originalRegisterExtension = Autodesk.Viewing.theExtensionManager.registerExtension;
+    Autodesk.Viewing.theExtensionManager.registerExtension = function(name: string, extension: any) {
+        if (name === 'Autodesk.Viewing.MixpanelExtension') {
+            console.warn('Visual: Suppressing MixpanelExtension registration to prevent localStorage errors');
+            return; // Don't register this extension
+        }
+        return originalRegisterExtension.call(this, name, extension);
+    };
+    
     viewer.start();
+    
+    // Restore original function after viewer starts
+    setTimeout(() => {
+        Autodesk.Viewing.theExtensionManager.registerExtension = originalRegisterExtension;
+    }, 1000);
+
+    // IMPORTANTE: Ejecutar callback DESPUÉS de viewer.start()
+    // Esto permite mostrar la animación para tapar el mensaje "Powered By Autodesk"
+    if (onViewerStarted) {
+        onViewerStarted();
+    }
 
     // Load VisualClusters extension for better performance with large models
-    await viewer.loadExtension('Autodesk.VisualClusters');
+    // Wrap in try-catch to prevent errors from blocking viewer initialization
+    try {
+        await viewer.loadExtension('Autodesk.VisualClusters');
+    } catch (error) {
+        console.warn('Visual: Could not load VisualClusters extension:', error);
+        // Continue without the extension - it's optional for performance
+    }
 
     // Load Model
     // skipPropertyDb: false by default, can be optimized later
@@ -501,7 +533,8 @@ export function applyPerformanceProfile(viewer: Autodesk.Viewing.GuiViewer3D, pr
     }
 }
 
-export function applyDefaultViewerConfiguration(viewer: Autodesk.Viewing.GuiViewer3D, customVisualContainer: HTMLElement) {
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+export function applyDefaultViewerConfiguration(viewer: Autodesk.Viewing.GuiViewer3D, _customVisualContainer: HTMLElement) {
     // Enable large model mode (BETA)
     viewer.prefs.set('largemodelmode', true);
 

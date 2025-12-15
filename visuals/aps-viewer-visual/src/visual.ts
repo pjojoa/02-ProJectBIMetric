@@ -577,6 +577,15 @@ export class Visual implements IVisual {
                 await this.syncColors();
             }
         }
+
+        // --- FINAL STEP: sincronizar colores si el usuario tiene el botón global ACTIVO ---
+        // Esto asegura que cualquier cambio en el panel de formato ("Data Colors")
+        // se refleje inmediatamente en el visor, incluso si no hay cambios de filtro/selección.
+        if (this.isGlobalColoringEnabled) {
+            // No esperamos el resultado para no bloquear el pipeline de actualización
+            // (syncColors internamente valida viewer/model/idMapping antes de aplicar).
+            void this.syncColors();
+        }
     }
 
     private async syncColors(): Promise<void> {

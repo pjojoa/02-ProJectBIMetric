@@ -77,7 +77,8 @@ export class Visual implements IVisual {
     private isProcessingSelection: boolean = false; // Flag to prevent concurrent selection processing
     private readonly SELECTION_DEBOUNCE_MS: number = 30; // Very short delay to let viewer update selection state after Ctrl+Click
 
-    private accessTokenEndpoint: string = '';
+    // Access Token Endpoint: valor por defecto (oculto de la UI pero usado internamente)
+    private accessTokenEndpoint: string = 'https://zero2-projectbimetric.onrender.com/token';
     private currentUrn: string = "";
 
 
@@ -145,9 +146,11 @@ export class Visual implements IVisual {
     // eslint-disable-next-line max-lines-per-function
     public async update(options: VisualUpdateOptions): Promise<void> {
         this.formattingSettings = this.formattingSettingsService.populateFormattingSettingsModel(VisualSettingsModel, options.dataViews[0]);
+        // Access Token Endpoint: usar valor de settings si está disponible, sino usar valor por defecto
         const { accessTokenEndpoint } = this.formattingSettings.viewerCard;
-        if (accessTokenEndpoint.value !== this.accessTokenEndpoint) {
-            this.accessTokenEndpoint = accessTokenEndpoint.value;
+        const endpointValue = accessTokenEndpoint?.value || 'https://zero2-projectbimetric.onrender.com/token';
+        if (endpointValue !== this.accessTokenEndpoint) {
+            this.accessTokenEndpoint = endpointValue;
             // If endpoint changes, we might need to re-init, but for now just update prop
         }
 
@@ -290,33 +293,40 @@ export class Visual implements IVisual {
             this.formattingSettings.dataPointCard.slices = [];
             this.categoryColorMap.clear();
 
-            // Default palette logic
-            const defaultColors = ['#01B8AA', '#374649', '#FD625E', '#F2C80F', '#5F6B6D', '#8AD4EB', '#FE9666', '#A66999'];
-            let colorIdx = 0;
+            // IMPORTANT:
+            // Ya NO generamos colores por defecto. El usuario debe elegir explícitamente
+            // el color de cada categoría en el panel de formato ("Data Colors").
+            //
+            // Reglas:
+            // - Si la categoría tiene un color guardado (meta.savedColor), lo usamos.
+            // - Si NO tiene color guardado, no aplicamos color en el visor hasta que
+            //   el usuario seleccione uno manualmente.
 
             categoryMetaMap.forEach((meta, category) => {
-                // Determine final values
-                const isShow = meta.savedShow !== null ? meta.savedShow : true; // Default to TRUE (show color)
-                const finalColor = meta.savedColor || defaultColors[colorIdx % defaultColors.length];
+                const hasUserColor = !!meta.savedColor;
+
+                // Determine final values for UI:
+                // - isShow: por defecto TRUE sólo si ya existe un color del usuario.
+                // - finalColorForUi: color mostrado en el ColorPicker. Si no hay color,
+                //   usamos un placeholder neutro sólo para la UI; el visor no lo usa
+                //   hasta que el usuario confirme un color.
+                const isShow = meta.savedShow !== null ? meta.savedShow : hasUserColor;
+                const finalColorForUi = meta.savedColor || '#01B8AA'; // Placeholder visual
 
                 // DETAILED LOGGING
                 console.log(`Visual: Processing category '${category}':`, {
                     rowIndex: meta.rowIndex,
                     savedColor: meta.savedColor,
                     savedShow: meta.savedShow,
-                    finalColor: finalColor,
+                    finalColorForUi: finalColorForUi,
                     isShow: isShow,
-                    usedDefault: !meta.savedColor
+                    hasUserColor: hasUserColor
                 });
 
-                // Only increment palette index if we used a default color (to keep palette stable-ish)
-                // or just increment always to match category order? Matching order is more deterministic.
-                colorIdx++;
-
-                // Update Map for Viewer (ONLY if Enable is TRUE)
-                if (isShow) {
-                    this.categoryColorMap.set(category, finalColor);
-                    console.log(`Visual: Added '${category}' to categoryColorMap with color ${finalColor}`);
+                // Update Map for Viewer (ONLY if Enable is TRUE AND hay color elegido por el usuario)
+                if (isShow && hasUserColor) {
+                    this.categoryColorMap.set(category, meta.savedColor as string);
+                    console.log(`Visual: Added '${category}' to categoryColorMap with user-selected color ${meta.savedColor}`);
                 }
 
                 // Create Selector tied to the specific row
@@ -333,15 +343,15 @@ export class Visual implements IVisual {
                     selector: selectionId.getSelector()
                 });
 
-                // 2. Color Picker "[Category]"
+                // 2. Color Picker "[Category]" - el usuario elige el color
                 const colorSlice = new ColorPicker({
                     name: "fill",
                     displayName: `${category} Color`,
-                    value: { value: finalColor },
+                    value: { value: finalColorForUi },
                     selector: selectionId.getSelector()
                 });
 
-                console.log(`Visual: Created slices for '${category}' - Toggle value: ${isShow}, Color value: ${finalColor}`);
+                console.log(`Visual: Created slices for '${category}' - Toggle value: ${isShow}, Color value: ${finalColorForUi}`);
 
                 this.formattingSettings.dataPointCard.slices.push(toggleSlice);
                 this.formattingSettings.dataPointCard.slices.push(colorSlice);

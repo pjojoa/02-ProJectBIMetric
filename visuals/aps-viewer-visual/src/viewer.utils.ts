@@ -504,10 +504,11 @@ export async function launchViewer(
     // ExternalId mapping (needed for bidirectional interaction) is NOT affected by skipPropertyDb
     const model = await loadModel(viewer, urn, guid || undefined, skipPropertyDb);
 
-    // Apply Performance Profile
+    // Apply Performance Profile (this may set lighting/background for performance)
     applyPerformanceProfile(viewer, performanceProfile);
 
     // Apply default viewer configuration (pass the container for proper positioning)
+    // IMPORTANT: This is called AFTER applyPerformanceProfile to ensure natural environment (preset 2) is always active
     applyDefaultViewerConfiguration(viewer, container);
 
     // Setup Selection Listener
@@ -567,11 +568,9 @@ export function applyPerformanceProfile(viewer: Autodesk.Viewing.GuiViewer3D, pr
             }
         }
         
-        // Disable expensive features
-        // Set solid black background for better performance (6 arguments: top, bottom, top2, bottom2, top3, bottom3)
-        viewer.setBackgroundColor(0x000000, 0x000000, 0x000000, 0x000000, 0x000000, 0x000000);
-        
-        // Reduce texture quality for faster loading and rendering
+        // Disable expensive features for maximum performance
+        // Note: Background color will be set by applyDefaultViewerConfiguration for natural environment
+        // Only reduce texture quality for faster loading and rendering
         if ((viewer as any).setTextureQuality) {
             (viewer as any).setTextureQuality(0.5); // Lower texture quality (50%)
         }
@@ -610,13 +609,10 @@ export function applyDefaultViewerConfiguration(viewer: Autodesk.Viewing.GuiView
     // Enable large model mode (BETA) - CRITICAL for performance with large models
     viewer.prefs.set('largemodelmode', true);
 
-    // Performance optimizations
-    // Disable environment background for better performance (can be re-enabled if needed)
-    // viewer.setEnvMapBackground(true); // Commented out for performance
-    
-    // Set simple lighting (ID: 0) instead of Plaza (ID: 8) for better performance
-    // Plaza lighting is more expensive and can slow down rendering
-    viewer.setLightPreset(0); // Simple lighting for better performance
+    // Set natural environment for better visual experience
+    // Preset 2 provides a natural, balanced lighting that looks good and performs well
+    viewer.setEnvMapBackground(true); // Enable environment background for natural look
+    viewer.setLightPreset(2); // Natural lighting preset (always active)
 
     // Configure selection mode for multi-selection support
     if (viewer.prefs) {
@@ -642,5 +638,5 @@ export function applyDefaultViewerConfiguration(viewer: Autodesk.Viewing.GuiView
     // Toolbar mantiene su configuración por defecto (centro, horizontal)
     // Las extensiones se cargarán automáticamente sin modificar la posición/orientación de la toolbar
 
-    console.log('Visual: Applied optimized viewer configuration (large model mode, simple lighting, performance optimizations)');
+    console.log('Visual: Applied optimized viewer configuration (large model mode, natural lighting preset 2, environment background enabled)');
 }

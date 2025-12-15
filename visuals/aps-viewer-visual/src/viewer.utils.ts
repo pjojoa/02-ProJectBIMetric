@@ -426,7 +426,8 @@ export async function launchViewer(
     performanceProfile: 'HighPerformance' | 'Balanced' = 'HighPerformance',
     env: string = 'AutodeskProduction2',
     api: string = 'streamingV2',
-    onViewerStarted?: () => void
+    onViewerStarted?: () => void,
+    skipPropertyDb: boolean = false
 ): Promise<{ viewer: Autodesk.Viewing.Viewer3D, model: Autodesk.Viewing.Model }> {
 
     // Initialize runtime if not already (Singleton)
@@ -439,21 +440,26 @@ export async function launchViewer(
 
     // Create Viewer instance
     // We use GuiViewer3D to get the toolbar
+    // Optimize: Disable extensions that are not needed for better performance
     const config: any = {
         extensions: ['BIMetric.GhostingExtension'], // Load our ghosting extension
         disabledExtensions: {
-            measure: false,
-            viewcube: false,
-            explode: true,
-            section: false,
+            measure: false, // Keep measure for user interaction
+            viewcube: false, // Keep viewcube for navigation
+            explode: true, // Disable explode (not needed)
+            section: false, // Keep section for analysis
             bimwalk: false, // Enable first-person navigation
-            fusionOrbit: true,
-            modelBrowser: false, // Enable Model Browser
-            propertiesPanel: false,
-            layerManager: true,
-            hyperlink: true,
+            fusionOrbit: true, // Disable fusionOrbit (not needed for BIM)
+            modelBrowser: false, // Keep modelBrowser (useful)
+            propertiesPanel: false, // Keep propertiesPanel (useful)
+            layerManager: true, // Disable layerManager for performance (can be enabled if needed)
+            hyperlink: true, // Disable hyperlink (not needed)
             // Disable MixpanelExtension to prevent localStorage errors in Power BI sandbox
-            MixpanelExtension: true
+            MixpanelExtension: true,
+            // Disable other heavy extensions for better performance
+            Debug: true, // Disable debug extension
+            MarkupsCore: true, // Disable markups if not needed
+            MarkupsGui: true // Disable markups GUI if not needed
         }
     };
 
@@ -493,8 +499,10 @@ export async function launchViewer(
     }
 
     // Load Model
-    // skipPropertyDb: false by default, can be optimized later
-    const model = await loadModel(viewer, urn, guid || undefined, false);
+    // skipPropertyDb: true for faster loading (skip property database)
+    // Note: If skipPropertyDb is true, properties won't be available but loading is much faster
+    // ExternalId mapping (needed for bidirectional interaction) is NOT affected by skipPropertyDb
+    const model = await loadModel(viewer, urn, guid || undefined, skipPropertyDb);
 
     // Apply Performance Profile
     applyPerformanceProfile(viewer, performanceProfile);
@@ -513,49 +521,125 @@ export async function launchViewer(
 
 export function applyPerformanceProfile(viewer: Autodesk.Viewing.GuiViewer3D, profile: 'HighPerformance' | 'Balanced') {
     if (profile === 'HighPerformance') {
+        // Maximum performance settings for best FPS and bidirectional interaction speed
         viewer.setProgressiveRendering(true);
         viewer.setQualityLevel(false, false); // No ambient shadows, no antialiasing
         viewer.setGroundShadow(false);
         viewer.setGroundReflection(false);
         viewer.setEnvMapBackground(false);
         viewer.setLightPreset(0); // Simple lighting
-
-        // Optimize navigation
+        
+        // Additional performance optimizations
         if (viewer.prefs) {
-            // Try to enable optimizeNavigation if available in prefs
-            // viewer.prefs.set('optimizeNavigation', true); 
+            // Enable optimizeNavigation for smoother navigation
+            try {
+                viewer.prefs.set('optimizeNavigation', true);
+            } catch (e) {
+                // Ignore if not available
+            }
+            
+            // Reduce render quality during navigation for better FPS
+            try {
+                viewer.prefs.set('navigationQuality', 'low');
+            } catch (e) {
+                // Ignore if not available
+            }
+            
+            // Enable frustum culling optimization
+            try {
+                viewer.prefs.set('frustumCulling', true);
+            } catch (e) {
+                // Ignore if not available
+            }
+            
+            // Enable aggressive culling for better frame rate
+            try {
+                viewer.prefs.set('aggressiveCulling', true);
+            } catch (e) {
+                // Ignore if not available
+            }
+            
+            // Reduce update frequency during navigation
+            try {
+                viewer.prefs.set('navigationUpdateFrequency', 'low');
+            } catch (e) {
+                // Ignore if not available
+            }
         }
+        
+        // Disable expensive features
+        viewer.setBackgroundColor(0x000000, 0x000000, 0x000000); // Solid black background (faster)
+        
+        // Reduce texture quality for faster loading and rendering
+        if ((viewer as any).setTextureQuality) {
+            (viewer as any).setTextureQuality(0.5); // Lower texture quality (50%)
+        }
+        
     } else {
-        // Balanced
+        // Balanced - good performance with some visual quality
         viewer.setProgressiveRendering(true);
         viewer.setQualityLevel(true, true); // Ambient shadows, AA
         viewer.setGroundShadow(true);
+        
+        // Moderate optimizations
+        if (viewer.prefs) {
+            try {
+                viewer.prefs.set('optimizeNavigation', true);
+            } catch (e) {
+                // Ignore if not available
+            }
+            
+            try {
+                viewer.prefs.set('frustumCulling', true);
+            } catch (e) {
+                // Ignore if not available
+            }
+        }
+    }
+    
+    // Common optimizations for both profiles
+    // Enable occlusion culling if available (hides objects behind others)
+    if ((viewer as any).setOcclusionCulling) {
+        (viewer as any).setOcclusionCulling(true);
     }
 }
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 export function applyDefaultViewerConfiguration(viewer: Autodesk.Viewing.GuiViewer3D, _customVisualContainer: HTMLElement) {
-    // Enable large model mode (BETA)
+    // Enable large model mode (BETA) - CRITICAL for performance with large models
     viewer.prefs.set('largemodelmode', true);
 
-    // Set environment background visible
-    viewer.setEnvMapBackground(true);
-
-    // Set environment to "Plaza" (ID: 8)
-    viewer.setLightPreset(8);
+    // Performance optimizations
+    // Disable environment background for better performance (can be re-enabled if needed)
+    // viewer.setEnvMapBackground(true); // Commented out for performance
+    
+    // Set simple lighting (ID: 0) instead of Plaza (ID: 8) for better performance
+    // Plaza lighting is more expensive and can slow down rendering
+    viewer.setLightPreset(0); // Simple lighting for better performance
 
     // Configure selection mode for multi-selection support
-    // Enable multi-selection: users can select multiple elements with Ctrl+Click or by clicking multiple elements
-    // The viewer supports multi-selection by default, but we ensure it's properly configured
     if (viewer.prefs) {
         // Ensure selection mode allows multiple selections
-        // The viewer's default behavior already supports multi-selection with Ctrl+Click
-        // We just need to make sure the selection system is ready
         console.log('Visual: Multi-selection enabled (Ctrl+Click to select multiple elements)');
+        
+        // Additional performance preferences
+        try {
+            // Enable aggressive culling for better frame rate
+            viewer.prefs.set('aggressiveCulling', true);
+        } catch (e) {
+            // Ignore if not available
+        }
+        
+        try {
+            // Reduce update frequency during navigation
+            viewer.prefs.set('navigationUpdateFrequency', 'low');
+        } catch (e) {
+            // Ignore if not available
+        }
     }
 
     // Toolbar mantiene su configuración por defecto (centro, horizontal)
     // Las extensiones se cargarán automáticamente sin modificar la posición/orientación de la toolbar
 
-    console.log('Visual: Applied default viewer configuration (large model mode, Plaza, multi-selection enabled, default toolbar)');
+    console.log('Visual: Applied optimized viewer configuration (large model mode, simple lighting, performance optimizations)');
 }

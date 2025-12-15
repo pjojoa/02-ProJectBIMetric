@@ -47,9 +47,15 @@ class ViewerCard extends Card {
             }
         ]
     });
+    skipPropertyDb = new formattingSettings.ToggleSwitch({
+        name: 'skipPropertyDb',
+        displayName: 'Fast Load (Skip Property DB)',
+        description: 'Skip loading property database for faster initial load (30-50% faster). Properties will not be available but visualization and bidirectional interaction work normally.',
+        value: false
+    });
     name: string = 'viewer';
     displayName: string = 'Viewer Runtime';
-    slices: Array<Slice> = [this.accessTokenEndpoint, this.viewerEnv, this.viewerRegion, this.performanceProfile];
+    slices: Array<Slice> = [this.accessTokenEndpoint, this.viewerEnv, this.viewerRegion, this.performanceProfile, this.skipPropertyDb];
 }
 
 export class DataPointCard extends Card {

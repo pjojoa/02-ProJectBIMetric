@@ -703,6 +703,9 @@ export class Visual implements IVisual {
             const env = this.formattingSettings.viewerCard.viewerEnv.value;
             // Determine API based on Env (SVF2 -> streamingV2, SVF -> derivativeV2)
             const api = env === 'AutodeskProduction2' ? 'streamingV2' : 'derivativeV2';
+            
+            // Get skipPropertyDb setting for faster loading
+            const skipPropertyDb = this.formattingSettings.viewerCard.skipPropertyDb.value;
 
             // Use the new launchViewer from utils
             // Callback se ejecuta DESPUÉS de viewer.start() para mostrar animación y tapar "Powered By Autodesk"
@@ -753,7 +756,8 @@ export class Visual implements IVisual {
                         this.loadingAnimationStartTime = null;
                         hideLoadingAnimation(this.container);
                     }, this.LOADING_ANIMATION_MAX_DURATION);
-                }
+                },
+                skipPropertyDb // Pass skipPropertyDb for faster loading
             );
 
             this.viewer = viewer;
@@ -1475,20 +1479,45 @@ export class Visual implements IVisual {
                     const NUCLEAR_GREEN = new THREE.Vector4(0.0, 1.0, 0.255, 1.0);
                     console.log(`Visual: syncSelectionState - Theming ${finalDbIds.length} nodes with NUCLEAR GREEN`);
 
-                    // Apply nuclear green color to each node (expanded)
-                    finalDbIds.forEach(dbid => {
-                        this.viewer.setThemingColor(dbid, NUCLEAR_GREEN, this.model);
-                    });
-
-                    // Forzar un repintado del visor tras aislamiento, selección y theming
-                    if ((this.viewer as any).impl?.invalidate) {
-                        console.log(`Visual: syncSelectionState - Forcing viewer.invalidate() after isolation/selection/theming`);
-                        (this.viewer as any).impl.invalidate(true, true, true);
+                    // OPTIMIZATION: Apply theming in batch for better performance
+                    // Use setThemingColor with array for faster batch operation if available
+                    // Otherwise, apply individually but optimize with requestAnimationFrame
+                    if (finalDbIds.length > 100) {
+                        // For large selections, batch the theming operation
+                        // Apply theming in chunks to avoid blocking the UI
+                        const chunkSize = 100;
+                        for (let i = 0; i < finalDbIds.length; i += chunkSize) {
+                            const chunk = finalDbIds.slice(i, i + chunkSize);
+                            chunk.forEach(dbid => {
+                                this.viewer.setThemingColor(dbid, NUCLEAR_GREEN, this.model);
+                            });
+                            // Yield to browser for smoother rendering
+                            if (i + chunkSize < finalDbIds.length) {
+                                await new Promise(resolve => requestAnimationFrame(resolve));
+                            }
+                        }
+                    } else {
+                        // For smaller selections, apply all at once
+                        finalDbIds.forEach(dbid => {
+                            this.viewer.setThemingColor(dbid, NUCLEAR_GREEN, this.model);
+                        });
                     }
+
+                    // OPTIMIZATION: Use requestAnimationFrame to synchronize visual updates
+                    // This ensures smoother rendering and better bidirectional interaction speed
+                    await new Promise(resolve => requestAnimationFrame(resolve));
 
                     // Step 6: Fit camera to view the isolated elements
                     console.log(`Visual: syncSelectionState - Fitting camera to ${finalDbIds.length} isolated elements`);
                     fitToView(this.viewer, this.model, finalDbIds);
+                    
+                    // OPTIMIZATION: Only invalidate if necessary (avoid unnecessary repaints)
+                    // The viewer will automatically repaint after isolation and theming
+                    // Only force invalidate for very large models if needed
+                    if (finalDbIds.length > 1000 && (this.viewer as any).impl?.invalidate) {
+                        console.log(`Visual: syncSelectionState - Forcing viewer.invalidate() for large selection (${finalDbIds.length} elements)`);
+                        (this.viewer as any).impl.invalidate(true, true, true);
+                    }
 
                     // Quitar el flag programático DESPUÉS de todas las operaciones
                     // Usamos un pequeño timeout para asegurar que los eventos se hayan procesado

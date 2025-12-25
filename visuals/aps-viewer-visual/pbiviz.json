@@ -4,7 +4,7 @@
         "displayName": "APS Viewer Visual",
         "guid": "aps_viewer_visual_a4f2990a03324cf79eb44f982719df44",
         "visualClassName": "Visual",
-        "version": "1.0.12.0",
+        "version": "1.0.8.0",
         "description": "Autodesk Platform Services Viewer for Power BI",
         "supportUrl": "https://github.com/pjojoa/02-ProJectBIMetric/issues",
         "gitHubUrl": "https://github.com/pjojoa/02-ProJectBIMetric"

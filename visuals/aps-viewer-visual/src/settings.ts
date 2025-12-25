@@ -47,12 +47,34 @@ class ViewerCard extends Card {
             }
         ]
     });
+    skipPropertyDb = new formattingSettings.ToggleSwitch({
+        name: 'skipPropertyDb',
+        displayName: 'Fast Load (Skip Property DB)',
+        description: 'Skip loading property database for faster initial load (30-50% faster). Properties will not be available but visualization and bidirectional interaction work normally.',
+        value: false
+    });
     name: string = 'viewer';
     displayName: string = 'Viewer Runtime';
-    slices: Array<Slice> = [this.accessTokenEndpoint, this.viewerEnv, this.viewerRegion, this.performanceProfile];
+    slices: Array<Slice> = [this.accessTokenEndpoint, this.viewerEnv, this.viewerRegion, this.performanceProfile, this.skipPropertyDb];
+}
+
+export class ColorSelectorCard extends Card {
+    showColor = new formattingSettings.ToggleSwitch({
+        name: 'showColor',
+        displayName: 'Show Colors',
+        description: 'Enable or disable categorical coloring in the 3D model.',
+        value: false
+    });
+
+    name: string = "colorSelector";
+    displayName: string = "Data Colors";
+
+    // Slices will be populated dynamically in visual.ts
+    slices: Array<Slice> = [this.showColor];
 }
 
 export class VisualSettingsModel extends Model {
     viewerCard = new ViewerCard();
-    cards = [this.viewerCard];
+    colorSelectorCard = new ColorSelectorCard();
+    cards = [this.viewerCard, this.colorSelectorCard];
 }

@@ -6,13 +6,8 @@
             "kind": "Grouping"
         },
         {
-            "displayName": "External IDs",
+            "displayName": "ExternalIds",
             "name": "externalIds",
-            "kind": "Grouping"
-        },
-        {
-            "displayName": "Vista",
-            "name": "guid",
             "kind": "Grouping"
         },
         {
@@ -38,45 +33,15 @@
                         },
                         {
                             "for": {
-                                "in": "guid"
-                            }
-                        },
-                        {
-                            "for": {
                                 "in": "color"
                             }
                         }
-                    ]
-                }
-            },
-            "categorical": {
-                "categories": {
-                    "select": [
-                        {
-                            "bind": {
-                                "to": "externalIds"
-                            }
+                    ],
+                    "dataReductionAlgorithm": {
+                        "window": {
+                            "count": 30000
                         }
-                    ]
-                },
-                "values": {
-                    "select": [
-                        {
-                            "bind": {
-                                "to": "urn"
-                            }
-                        },
-                        {
-                            "bind": {
-                                "to": "guid"
-                            }
-                        },
-                        {
-                            "bind": {
-                                "to": "color"
-                            }
-                        }
-                    ]
+                    }
                 }
             }
         }
@@ -87,6 +52,27 @@
                 "accessTokenEndpoint": {
                     "type": {
                         "text": true
+                    }
+                }
+            }
+        },
+        "colorSelector": {
+            "displayName": "Data Colors",
+            "properties": {
+                "fill": {
+                    "displayName": "Fill",
+                    "type": {
+                        "fill": {
+                            "solid": {
+                                "color": true
+                            }
+                        }
+                    }
+                },
+                "showColor": {
+                    "displayName": "Show Color",
+                    "type": {
+                        "bool": true
                     }
                 }
             }

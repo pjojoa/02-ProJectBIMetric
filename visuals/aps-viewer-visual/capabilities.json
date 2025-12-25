@@ -56,7 +56,7 @@
                 }
             }
         },
-        "dataPoint": {
+        "colorSelector": {
             "displayName": "Data Colors",
             "properties": {
                 "fill": {

@@ -91,8 +91,8 @@ export class Visual implements IVisual {
     private loadingAnimationHide: (() => void) | null = null;
     private loadingAnimationTimeout: number | null = null;
     private loadingAnimationStartTime: number | null = null;
-    private readonly LOADING_ANIMATION_MIN_DURATION: number = 6000; // 6 segundos mínimos (2 segundos más que antes)
-    private readonly LOADING_ANIMATION_MAX_DURATION: number = 12000; // 12 segundos máximo como seguridad
+    private readonly LOADING_ANIMATION_MIN_DURATION: number = 3000; // Reducido a 3 segundos (antes 6s)
+    private readonly LOADING_ANIMATION_MAX_DURATION: number = 8000; // Reducido a 8 segundos (antes 12s)
 
     // Data Storage
     private allRows: DataViewTableRow[] = [];
@@ -147,9 +147,24 @@ export class Visual implements IVisual {
     public async update(options: VisualUpdateOptions): Promise<void> {
         // IMPORTANTE: Populate settings ANTES de procesar datos para capturar cambios del usuario
         this.formattingSettings = this.formattingSettingsService.populateFormattingSettingsModel(VisualSettingsModel, options.dataViews[0]);
-        
+
         // Guardar estado anterior de categoryColorMap para detectar cambios
         const previousCategoryColorMap = new Map(this.categoryColorMap);
+
+        // Sincronizar isGlobalColoringEnabled con el setting persistente
+        const showColorValue = this.formattingSettings.colorSelectorCard.showColor.value;
+        if (showColorValue !== this.isGlobalColoringEnabled) {
+            console.log(`Visual: showColor setting changed: ${this.isGlobalColoringEnabled} -> ${showColorValue}`);
+            this.isGlobalColoringEnabled = showColorValue;
+
+            // Actualizar estado del botón si ya existe
+            if (this.paintBucketButton) {
+                const newState = this.isGlobalColoringEnabled ?
+                    Autodesk.Viewing.UI.Button.State.ACTIVE :
+                    Autodesk.Viewing.UI.Button.State.INACTIVE;
+                this.paintBucketButton.setState(newState);
+            }
+        }
         // Access Token Endpoint: usar valor de settings si está disponible, sino usar valor por defecto
         const { accessTokenEndpoint } = this.formattingSettings.viewerCard;
         const endpointValue = accessTokenEndpoint?.value || 'https://zero2-projectbimetric.onrender.com/token';
@@ -261,12 +276,15 @@ export class Visual implements IVisual {
                 const objects = row.objects;
                 let sColor: string | null = null;
 
-                if (objects && objects['dataPoint']) {
-                    const dp = objects['dataPoint'] as any;
+                if (objects && objects['colorSelector']) {
+                    const dp = objects['colorSelector'] as any;
                     if (dp.fill && dp.fill.solid && dp.fill.solid.color) {
                         sColor = dp.fill.solid.color;
-                        console.log(`Visual: Found saved color for category '${colorValue}' at row ${rowIndex}: ${sColor}`);
+                        console.log(`Visual: [COLOR-MAP] Found object for '${colorValue}' at row ${rowIndex}:`, dp.fill.solid.color);
                     }
+                } else if (objects) {
+                    // Log if objects exist but not colorSelector
+                    console.log(`Visual: [COLOR-MAP] Row ${rowIndex} has objects but no colorSelector:`, Object.keys(objects));
                 }
 
                 // Si ya tenemos esta categoría, actualizar el color guardado SIEMPRE que encontremos uno
@@ -289,14 +307,17 @@ export class Visual implements IVisual {
             });
 
             // 2. Populate Formatting Settings with Dynamic Slices
-            this.formattingSettings.dataPointCard.slices = [];
+            // IMPORTANTE: Preservar el switch global 'showColor'
+            this.formattingSettings.colorSelectorCard.slices = [this.formattingSettings.colorSelectorCard.showColor];
             this.categoryColorMap.clear();
+
+            console.log(`Visual: [COLOR-MAP] Identified ${categoryMetaMap.size} unique categories to generate slices.`);
 
             // Estrategia de color mejorada:
             // - Colores por defecto consistentes usando hash de la categoría (mismo nombre = mismo color)
             // - Si el usuario elige un color, ese color se guarda y persiste al cambiar de página
             const defaultColors = ['#01B8AA', '#374649', '#FD625E', '#F2C80F', '#5F6B6D', '#8AD4EB', '#FE9666', '#A66999'];
-            
+
             // Función para obtener un color por defecto consistente basado en el nombre de la categoría
             const getDefaultColorForCategory = (category: string): string => {
                 // Usar un hash simple del nombre para obtener siempre el mismo color por defecto
@@ -347,9 +368,9 @@ export class Visual implements IVisual {
 
                 console.log(`Visual: Created slices for '${category}' - Color value: ${finalColor}`);
 
-                this.formattingSettings.dataPointCard.slices.push(colorSlice);
+                this.formattingSettings.colorSelectorCard.slices.push(colorSlice);
             });
-            
+
             // Detectar cambios en los colores y forzar actualización del visor si es necesario
             let colorsChanged = false;
             if (previousCategoryColorMap.size !== this.categoryColorMap.size) {
@@ -365,7 +386,7 @@ export class Visual implements IVisual {
                     }
                 }
             }
-            
+
             // Si los colores cambiaron y el botón global está activo, actualizar inmediatamente
             if (colorsChanged && this.isGlobalColoringEnabled && this.viewer && this.model && this.idMapping) {
                 console.log('Visual: Colors changed, forcing immediate syncColors() update');
@@ -448,7 +469,7 @@ export class Visual implements IVisual {
         // Detectar: nuevo URN O reinicio del visor (viewer es null pero hay URN)
         const isNewUrn = modelUrn && modelUrn !== this.currentUrn;
         const needsInitialization = modelUrn && (!this.viewer || isNewUrn);
-        
+
         if (needsInitialization) {
             // Si hay un visor anterior, destruirlo primero
             if (this.viewer) {
@@ -457,7 +478,7 @@ export class Visual implements IVisual {
             } else if (modelUrn && !this.viewer) {
                 console.log("Visual: Viewer restart detected (viewer is null but URN exists)");
             }
-            
+
             this.currentUrn = modelUrn;
             await this.initializeViewer();
         }
@@ -604,13 +625,19 @@ export class Visual implements IVisual {
     }
 
     private async syncColors(): Promise<void> {
-        if (!this.viewer || !this.model || !this.idMapping) return;
+        if (!this.viewer || !this.model || !this.idMapping) {
+            console.log('Visual: [SYNC-COLORS] Skipping sync - viewer/model/mapping not ready');
+            return;
+        }
 
         // Respect global toggle
         if (!this.isGlobalColoringEnabled) {
+            console.log('Visual: [SYNC-COLORS] Coloring disabled, clearing theming');
             this.viewer.clearThemingColors(this.model);
             return;
         }
+
+        console.log(`Visual: [SYNC-COLORS] Starting color sync for ${this.categoryColorMap.size} categories`);
 
         // Clear any existing theming
         this.viewer.clearThemingColors(this.model);
@@ -629,12 +656,16 @@ export class Visual implements IVisual {
             }
         });
 
+        console.log(`Visual: [SYNC-COLORS] Mapped ${this.elementDataMap.size} elements to ${colorToExternalIds.size} unique hex colors`);
+
         // Apply colors in parallel
         const promises = [];
         for (const [hexColor, externalIds] of colorToExternalIds) {
+            console.log(`Visual: [SYNC-COLORS] Applying ${hexColor} to ${externalIds.length} elements`);
             promises.push(this.applyColorToExternalIds(hexColor, externalIds));
         }
         await Promise.all(promises);
+        console.log('Visual: [SYNC-COLORS] Sync complete');
     }
 
     private async applyColorToExternalIds(hexColor: string, externalIds: string[]) {
@@ -737,7 +768,7 @@ export class Visual implements IVisual {
             const env = this.formattingSettings.viewerCard.viewerEnv.value;
             // Determine API based on Env (SVF2 -> streamingV2, SVF -> derivativeV2)
             const api = env === 'AutodeskProduction2' ? 'streamingV2' : 'derivativeV2';
-            
+
             // Get skipPropertyDb setting for faster loading
             const skipPropertyDb = this.formattingSettings.viewerCard.skipPropertyDb.value;
 
@@ -767,10 +798,10 @@ export class Visual implements IVisual {
                     // IMPORTANTE: Mostrar animación DESPUÉS de viewer.start()
                     // Esto tapa el mensaje "Powered By Autodesk" que aparece durante la carga
                     console.log("Visual: Showing loading animation after viewer.start() to hide 'Powered By Autodesk' message");
-                    
+
                     // Guardar tiempo de inicio
                     this.loadingAnimationStartTime = Date.now();
-                    
+
                     const hideFn = showLoadingAnimation(
                         this.container,
                         this.LOADING_ANIMATION_MAX_DURATION, // Usar duración máxima como timeout de seguridad
@@ -778,7 +809,7 @@ export class Visual implements IVisual {
                         "SKYDATABIM S.A.S."
                     );
                     this.loadingAnimationHide = hideFn;
-                    
+
                     // Timeout de seguridad: ocultar después del máximo si no se ha ocultado antes
                     this.loadingAnimationTimeout = window.setTimeout(() => {
                         console.log("Visual: Maximum animation duration reached. Forcing hide.");
@@ -807,7 +838,7 @@ export class Visual implements IVisual {
             setTimeout(() => {
                 this.setupToolbar();
             }, 100);
-            
+
             // IMPORTANTE: Ocultar animación cuando el modelo esté completamente cargado
             // Esto asegura que siempre tape "Powered By Autodesk" hasta que el modelo esté listo
             const hideAnimationWhenReady = () => {
@@ -815,11 +846,11 @@ export class Visual implements IVisual {
                     // No hay animación activa, salir
                     return;
                 }
-                
+
                 // Calcular tiempo transcurrido desde que se inició la animación
                 const elapsed = Date.now() - this.loadingAnimationStartTime;
                 const remaining = this.LOADING_ANIMATION_MIN_DURATION - elapsed;
-                
+
                 if (elapsed >= this.LOADING_ANIMATION_MIN_DURATION) {
                     // Han pasado al menos 6 segundos, ocultar animación inmediatamente
                     console.log(`Visual: Model loaded. Hiding loading animation (${elapsed}ms elapsed, minimum 6s satisfied)`);
@@ -896,7 +927,7 @@ export class Visual implements IVisual {
             console.error("Visual: Error initializing viewer", error);
             this.statusDiv.innerText = "Error loading viewer";
             this.statusDiv.style.color = "red";
-            
+
             // Ocultar animación en caso de error
             if (this.loadingAnimationHide) {
                 this.loadingAnimationHide();
@@ -1207,8 +1238,8 @@ export class Visual implements IVisual {
             }
 
             // Set initial state based on isGlobalColoringEnabled
-            const initialState = this.isGlobalColoringEnabled ? 
-                Autodesk.Viewing.UI.Button.State.ACTIVE : 
+            const initialState = this.isGlobalColoringEnabled ?
+                Autodesk.Viewing.UI.Button.State.ACTIVE :
                 Autodesk.Viewing.UI.Button.State.INACTIVE;
             this.paintBucketButton.setState(initialState);
 
@@ -1217,10 +1248,23 @@ export class Visual implements IVisual {
                 this.isGlobalColoringEnabled = !this.isGlobalColoringEnabled;
 
                 // Update button state (same pattern as ghosting button)
-                const newState = this.isGlobalColoringEnabled ? 
-                    Autodesk.Viewing.UI.Button.State.ACTIVE : 
+                const newState = this.isGlobalColoringEnabled ?
+                    Autodesk.Viewing.UI.Button.State.ACTIVE :
                     Autodesk.Viewing.UI.Button.State.INACTIVE;
                 this.paintBucketButton.setState(newState);
+
+                // PERSISTIRCUALQUIER cambio en el setting (opcional but recommended)
+                this.host.persistProperties({
+                    merge: [
+                        {
+                            objectName: "colorSelector",
+                            properties: {
+                                showColor: this.isGlobalColoringEnabled
+                            },
+                            selector: null
+                        }
+                    ]
+                });
 
                 // Update visual state
                 if (this.isGlobalColoringEnabled) {
@@ -1228,7 +1272,7 @@ export class Visual implements IVisual {
                 } else {
                     this.viewer.clearThemingColors(this.model);
                 }
-                
+
                 console.log('Visual: Paint bucket (colors) set to ' + (this.isGlobalColoringEnabled ? 'ACTIVE' : 'INACTIVE'));
             };
 
@@ -1269,7 +1313,7 @@ export class Visual implements IVisual {
                 }
             };
             this.viewer.addEventListener(Autodesk.Viewing.TOOLBAR_CREATED_EVENT, toolbarListener);
-            
+
             // Also set a timeout as backup in case the event doesn't fire
             setTimeout(() => {
                 if (!this.paintBucketButton && (this.viewer as any).getToolbar()) {
@@ -1544,7 +1588,7 @@ export class Visual implements IVisual {
                     // Step 6: Fit camera to view the isolated elements
                     console.log(`Visual: syncSelectionState - Fitting camera to ${finalDbIds.length} isolated elements`);
                     fitToView(this.viewer, this.model, finalDbIds);
-                    
+
                     // OPTIMIZATION: Only invalidate if necessary (avoid unnecessary repaints)
                     // The viewer will automatically repaint after isolation and theming
                     // Only force invalidate for very large models if needed

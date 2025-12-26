@@ -106,6 +106,8 @@ export class Visual implements IVisual {
     private externalIdToRowIndexMap: Map<ExternalId, number> = new Map();
     /** Maps Category Value -> Hex Color (resolved from settings) */
     private categoryColorMap: Map<string, string> = new Map();
+    /** Persistent memory for user-selected colors (Category Name -> Hex Color) */
+    private savedCategoryColors: Map<string, string> = new Map();
 
 
     constructor(options: VisualConstructorOptions) {
@@ -197,29 +199,28 @@ export class Visual implements IVisual {
         // 3. Handle Pagination and Data Accumulation
         const isCreate = options.operationKind === powerbi.VisualDataChangeOperationKind.Create;
         const isAppend = options.operationKind === powerbi.VisualDataChangeOperationKind.Append;
-        const hasSegment = this.currentDataView?.metadata?.segment != null;
+        const isDataUpdate = (options.type & powerbi.VisualUpdateType.Data) !== 0;
+        // Settings/Formatting changes usually come as 'All' or 'Style' if not specific
+        const isFormattingUpdate = !isDataUpdate && ((options.type & powerbi.VisualUpdateType.All) !== 0 || (options.type & powerbi.VisualUpdateType.Style) !== 0);
 
-        // Check if data is filtered BEFORE processing
+        const hasSegment = this.currentDataView?.metadata?.segment != null;
         const isDataFilterApplied = this.currentDataView.metadata && this.currentDataView.metadata.isDataFilterApplied === true;
 
-        // CRITICAL: Only reset on Create if there's NO filter applied
-        // When Power BI applies a filter, it sends Create operation, but we need to preserve the full dataset
-        if (isCreate && !isDataFilterApplied) {
-            // Fresh start - no filter, so reset everything
-            console.log('Visual: Create operation without filter - resetting all data');
+        // CRITICAL: Only reset on Create if it's a DATA update and NO filter is applied
+        // If it's only a Formatting update, we MUST NOT reset allRows or we lose paged data!
+        if (isCreate && isDataUpdate && !isDataFilterApplied) {
+            console.log('Visual: Create Data operation - resetting all data');
             this.allRows = [];
             this.elementDataMap.clear();
             this.externalIds = [];
             this.allDbIds = null;
             this.dbIdToColumnValueMap.clear();
-        } else if (isCreate && isDataFilterApplied) {
-            // Create with filter - preserve existing full dataset
-            console.log('Visual: Create operation WITH filter - preserving existing full dataset');
-            // Don't reset allRows, externalIds, or allDbIds
+            this.externalIdToRowIndexMap.clear();
+        } else if (isFormattingUpdate) {
+            console.log('Visual: Formatting-only update - preserving existing data');
         }
 
-        // Process current visible rows FIRST to get currentBatchIds
-        // These are the filtered rows if filter is applied, or all rows if not
+        // Process current visible rows FIRST and accumulate in allRows
         const currentBatchIds: string[] = [];
         const currentRowSet = new Set<string>(); // Track unique IDs in current batch
 
@@ -230,7 +231,8 @@ export class Visual implements IVisual {
             }
             const selectionId = selectionIdBuilder.createSelectionId();
             const externalIdValue = externalIdsIndex !== -1 ? row[externalIdsIndex] : null;
-            const colorValue = colorIndex !== -1 ? String(row[colorIndex]) : null;
+            const colorValueRaw = colorIndex !== -1 ? row[colorIndex] : null;
+            const colorValue = colorValueRaw != null ? String(colorValueRaw).trim() : null;
 
             if (externalIdValue != null) {
                 const key = selectionId.getKey();
@@ -259,19 +261,46 @@ export class Visual implements IVisual {
             }
         });
 
-        // --- CATEGORICAL COLORING LOGIC ---
-        // 1. Identify unique categories from the 'color' column
-        // We only do this if a color column is mapped
-        if (colorIndex !== -1) {
-            // 1. Identify unique categories and find the BEST row to use for settings
-            // Estrategia mejorada: buscar TODAS las filas de cada categoría para encontrar colores guardados
-            // Map: Category Value -> { rowIndex (primera fila encontrada), savedColor (de cualquier fila de esa categoría) }
-            const categoryMetaMap = new Map<string, { rowIndex: number, savedColor: string | null }>();
+        // Accumulate rows and IDs - ONLY when NOT filtered and it's a Data update
+        if (!isDataFilterApplied && isDataUpdate) {
+            // No filter: accumulate all rows to build full dataset (handles pagination)
+            // But only if these are new rows (avoid duplicates if update is called multiple times for same data)
+            // Simple check: if it's Append or first batch of Create
+            if (isAppend || this.allRows.length === 0) {
+                this.allRows = this.allRows.concat(dataView.table.rows);
 
-            // Primera pasada: identificar todas las categorías únicas y encontrar colores guardados
-            dataView.table.rows.forEach((row, rowIndex) => {
-                const colorValue = String(row[colorIndex]).trim();
-                if (!colorValue) return;
+                // Accumulate unique ExternalIds
+                const existingIdsSet = new Set(this.externalIds);
+                let newIdsAdded = false;
+
+                currentBatchIds.forEach(externalId => {
+                    if (!existingIdsSet.has(externalId)) {
+                        this.externalIds.push(externalId);
+                        existingIdsSet.add(externalId);
+                        newIdsAdded = true;
+                    }
+                });
+
+                // Update allDbIds with accumulated externalIds (represents full dataset)
+                this.allDbIds = this.externalIds.slice();
+
+                if (newIdsAdded) {
+                    console.log(`Visual: Accumulated data - Total Rows: ${this.allRows.length}, Unique IDs: ${this.externalIds.length}`);
+                }
+            }
+        }
+
+        // --- CATEGORICAL COLORING LOGIC ---
+        if (colorIndex !== -1) {
+            const categoryMetaMap = new Map<string, { currentBatchIndex: number | null, savedColorInThisUpdate: string | null }>();
+
+            // 1. Scan the COMPLETE allRows for categories and persistent objects
+            this.allRows.forEach((row) => {
+                const colorValueRaw = row[colorIndex];
+                if (colorValueRaw == null) return;
+
+                const category = String(colorValueRaw).trim();
+                if (!category) return;
 
                 const objects = row.objects;
                 let sColor: string | null = null;
@@ -280,151 +309,88 @@ export class Visual implements IVisual {
                     const dp = objects['colorSelector'] as any;
                     if (dp.fill && dp.fill.solid && dp.fill.solid.color) {
                         sColor = dp.fill.solid.color;
-                        console.log(`Visual: [COLOR-MAP] Found object for '${colorValue}' at row ${rowIndex}:`, dp.fill.solid.color);
+                        if (this.savedCategoryColors.get(category) !== sColor) {
+                            console.log(`Visual: [COLOR] Found color override in objects for '${category}': ${sColor}`);
+                            this.savedCategoryColors.set(category, sColor);
+                        }
                     }
-                } else if (objects) {
-                    // Log if objects exist but not colorSelector
-                    console.log(`Visual: [COLOR-MAP] Row ${rowIndex} has objects but no colorSelector:`, Object.keys(objects));
                 }
 
-                // Si ya tenemos esta categoría, actualizar el color guardado SIEMPRE que encontremos uno
-                // (el usuario puede haber cambiado el color, así que debemos usar el más reciente)
-                const existing = categoryMetaMap.get(colorValue);
-                if (existing) {
-                    // Si encontramos un color guardado, usarlo (puede ser nuevo o actualizado)
-                    if (sColor) {
-                        existing.savedColor = sColor;
-                        console.log(`Visual: Updated saved color for '${colorValue}' from row ${rowIndex}: ${sColor}`);
-                    }
-                    // Si no encontramos color en esta fila pero ya teníamos uno guardado, mantenerlo
-                } else {
-                    // Primera vez que vemos esta categoría: guardar rowIndex y color (si existe)
-                    categoryMetaMap.set(colorValue, {
-                        rowIndex: rowIndex,
-                        savedColor: sColor
+                if (!categoryMetaMap.has(category)) {
+                    categoryMetaMap.set(category, {
+                        currentBatchIndex: null,
+                        savedColorInThisUpdate: sColor
                     });
+                } else if (sColor) {
+                    categoryMetaMap.get(category).savedColorInThisUpdate = sColor;
                 }
             });
 
-            // 2. Populate Formatting Settings with Dynamic Slices
-            // IMPORTANTE: Preservar el switch global 'showColor'
+            // 2. Identify indices in the CURRENT batch to build valid selectors
+            dataView.table.rows.forEach((row, rowIndex) => {
+                const colorValueRaw = row[colorIndex];
+                if (colorValueRaw == null) return;
+                const category = String(colorValueRaw).trim();
+                const meta = categoryMetaMap.get(category);
+                if (meta && meta.currentBatchIndex === null) {
+                    meta.currentBatchIndex = rowIndex;
+                }
+            });
+
+            // 3. Build the final color map
             this.formattingSettings.colorSelectorCard.slices = [this.formattingSettings.colorSelectorCard.showColor];
             this.categoryColorMap.clear();
 
-            console.log(`Visual: [COLOR-MAP] Identified ${categoryMetaMap.size} unique categories to generate slices.`);
-
-            // Estrategia de color mejorada:
-            // - Colores por defecto consistentes usando hash de la categoría (mismo nombre = mismo color)
-            // - Si el usuario elige un color, ese color se guarda y persiste al cambiar de página
             const defaultColors = ['#01B8AA', '#374649', '#FD625E', '#F2C80F', '#5F6B6D', '#8AD4EB', '#FE9666', '#A66999'];
-
-            // Función para obtener un color por defecto consistente basado en el nombre de la categoría
             const getDefaultColorForCategory = (category: string): string => {
-                // Usar un hash simple del nombre para obtener siempre el mismo color por defecto
                 let hash = 0;
                 for (let i = 0; i < category.length; i++) {
                     hash = ((hash << 5) - hash) + category.charCodeAt(i);
-                    hash = hash & hash; // Convert to 32bit integer
+                    hash = hash & hash;
                 }
                 const index = Math.abs(hash) % defaultColors.length;
                 return defaultColors[index];
             };
 
             categoryMetaMap.forEach((meta, category) => {
-                const hasUserColor = !!meta.savedColor;
-
-                // Color final que usaremos tanto en la UI como en el visor:
-                // - Si el usuario definió un color, usamos ese (prioridad absoluta).
-                // - Si no, usamos un color por defecto CONSISTENTE basado en el nombre de la categoría.
-                const finalColor = hasUserColor
-                    ? (meta.savedColor as string)
-                    : getDefaultColorForCategory(category);
-
-                // DETAILED LOGGING
-                console.log(`Visual: Processing category '${category}':`, {
-                    rowIndex: meta.rowIndex,
-                    savedColor: meta.savedColor,
-                    finalColor: finalColor,
-                    hasUserColor: hasUserColor
-                });
-
-                // Actualizar Map para el visor SIEMPRE (siempre habrá un color final)
+                // Priority: Current Update > Persistent Memory > Default
+                const finalColor = meta.savedColorInThisUpdate || this.savedCategoryColors.get(category) || getDefaultColorForCategory(category);
                 this.categoryColorMap.set(category, finalColor);
-                console.log(`Visual: Added '${category}' to categoryColorMap with color ${finalColor}`);
 
-                // Create Selector tied to the specific row
-                const selectionIdBuilder = this.host.createSelectionIdBuilder();
-                selectionIdBuilder.withTable(dataView.table, meta.rowIndex);
-                const selectionId = selectionIdBuilder.createSelectionId();
+                if (meta.currentBatchIndex !== null) {
+                    const selectionIdBuilder = this.host.createSelectionIdBuilder();
+                    selectionIdBuilder.withTable(dataView.table, meta.currentBatchIndex);
+                    const selectionId = selectionIdBuilder.createSelectionId();
 
-                // Create Slices
-                // ÚNICO control: Color Picker "[Category]" - el usuario puede sobrescribir el color
-                const colorSlice = new ColorPicker({
-                    name: "fill",
-                    displayName: `${category} Color`,
-                    value: { value: finalColor },
-                    selector: selectionId.getSelector()
-                });
-
-                console.log(`Visual: Created slices for '${category}' - Color value: ${finalColor}`);
-
-                this.formattingSettings.colorSelectorCard.slices.push(colorSlice);
+                    this.formattingSettings.colorSelectorCard.slices.push(new ColorPicker({
+                        name: "fill",
+                        displayName: `${category} Color`,
+                        value: { value: finalColor },
+                        selector: selectionId.getSelector()
+                    }));
+                }
             });
 
-            // Detectar cambios en los colores y forzar actualización del visor si es necesario
-            let colorsChanged = false;
-            if (previousCategoryColorMap.size !== this.categoryColorMap.size) {
-                colorsChanged = true;
-                console.log(`Visual: Category count changed: ${previousCategoryColorMap.size} -> ${this.categoryColorMap.size}`);
-            } else {
-                for (const [category, color] of this.categoryColorMap) {
-                    const previousColor = previousCategoryColorMap.get(category);
-                    if (previousColor !== color) {
-                        colorsChanged = true;
-                        console.log(`Visual: Color changed for category '${category}': ${previousColor || 'none'} -> ${color}`);
-                        break;
+            // Forced Viewer Sync if colors changed or if it's a formatting update
+            let shouldSync = isFormattingUpdate;
+            if (!shouldSync) {
+                if (previousCategoryColorMap.size !== this.categoryColorMap.size) {
+                    shouldSync = true;
+                } else {
+                    for (const [cat, col] of this.categoryColorMap) {
+                        if (previousCategoryColorMap.get(cat) !== col) {
+                            shouldSync = true;
+                            break;
+                        }
                     }
                 }
             }
 
-            // Si los colores cambiaron y el botón global está activo, actualizar inmediatamente
-            if (colorsChanged && this.isGlobalColoringEnabled && this.viewer && this.model && this.idMapping) {
-                console.log('Visual: Colors changed, forcing immediate syncColors() update');
+            if (shouldSync && this.isGlobalColoringEnabled && this.viewer && this.model && this.idMapping) {
+                console.log('Visual: Colors changed or formatting update, syncing viewer...');
                 void this.syncColors();
             }
-
         }
-
-
-        // Accumulate rows and IDs - ONLY when NOT filtered
-        // This builds the full dataset during initial load and pagination
-        if (!isDataFilterApplied) {
-            // No filter: accumulate all rows to build full dataset (handles pagination)
-            this.allRows = this.allRows.concat(dataView.table.rows);
-
-            // Accumulate unique ExternalIds - OPTIMIZED
-            // Using Set for O(1) lookups instead of O(N) array.includes
-            const existingIdsSet = new Set(this.externalIds);
-            let newIdsAdded = false;
-
-            currentBatchIds.forEach(externalId => {
-                if (!existingIdsSet.has(externalId)) {
-                    this.externalIds.push(externalId);
-                    existingIdsSet.add(externalId); // Keep Set in sync for this loop
-                    newIdsAdded = true;
-                }
-            });
-
-            // Update allDbIds with accumulated externalIds (represents full dataset)
-            this.allDbIds = this.externalIds.slice(); // Create a copy of full dataset
-
-            if (newIdsAdded) {
-                console.log(`Visual: Accumulated data - Total Rows: ${this.allRows.length}, Unique IDs: ${this.externalIds.length}`);
-            }
-        }
-        // When filtered: 
-        // - allRows and externalIds remain as the last known full dataset (preserved from above)
-        // - currentBatchIds contains the filtered IDs (use these for highlighting)
 
         // 4. Handle Model Loading (URN)
         // Use current dataView rows for URN/GUID (works even when filtered)
@@ -433,14 +399,7 @@ export class Visual implements IVisual {
             modelUrn = String(dataView.table.rows[0][urnIndex]);
         }
 
-        // 5. Handle View GUID
-        // 5. Handle View GUID - REMOVED
-        // let viewGuid: string | null = null;
-        // if (guidIndex !== -1 && dataView.table.rows.length > 0) {
-        //     viewGuid = String(dataView.table.rows[0][guidIndex]);
-        // }
-
-        // 6. Handle Pagination Fetch - AGGRESSIVE
+        // 5. Handle Pagination Fetch - AGGRESSIVE
         // We want to fetch ALL data to ensure the viewer can map everything
         const HARD_LIMIT = 200000; // Safety cap to prevent browser crash
 
@@ -448,9 +407,7 @@ export class Visual implements IVisual {
             if (this.allRows.length < HARD_LIMIT) {
                 const moreData = this.host.fetchMoreData();
                 if (moreData) {
-                    this.statusDiv.innerText = `Loading data... (${this.allRows.length} rows loaded)`;
-                    this.statusDiv.style.backgroundColor = '#d9534f'; // Red/Orange for "Busy"
-                    this.statusDiv.style.color = 'white';
+                    return;
                 }
             } else {
                 this.statusDiv.innerText = `Warning: Data limit reached (${HARD_LIMIT} rows). Some objects may not be selectable.`;
@@ -829,6 +786,12 @@ export class Visual implements IVisual {
             this.model = model;
             this.idMapping = new IdMapping(this.model);
             this.isViewerReady = true;
+
+            // Trigger color sync if enabled
+            if (this.isGlobalColoringEnabled) {
+                console.log("Visual: Triggering initial color sync after viewer ready");
+                void this.syncColors();
+            }
 
             console.log("Visual: Viewer initialized successfully with profile:", profile);
 
